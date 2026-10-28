@@ -22,6 +22,19 @@ FLOAT = ir.DataType.FLOAT
 class GemmTest(unittest.TestCase):
     @parameterized.parameterized.expand(
         [
+            (dtype.name, dtype, shape)
+            for dtype in (ir.DataType.FLOAT16, ir.DataType.BFLOAT16)
+            for shape in ([7, 5], None)
+        ]
+    )
+    def test_preserves_input_dtype(self, _name, dtype, shape):
+        actual = run_shape_inference(
+            "", "Gemm", [ts(dtype, shape), ts(dtype, [5, 11])], opset_version=17
+        )
+        self.assertEqual(actual, [ts(dtype, [7, 11] if shape is not None else None)])
+
+    @parameterized.parameterized.expand(
+        [
             ("basic", [7, 5], [5, 11], 0, 0, [7, 11]),
             ("trans_a", [5, 7], [5, 11], 1, 0, [7, 11]),
             ("trans_b", [7, 5], [11, 5], 0, 1, [7, 11]),

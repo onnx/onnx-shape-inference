@@ -13,7 +13,7 @@ __all__: list[str] = []
 import onnx_ir as ir
 
 from onnx_shape_inference import _context, _registry
-from onnx_shape_inference._ops import _conv, _matmul
+from onnx_shape_inference._ops import _conv, _gemm, _matmul
 
 _MSFT = "com.microsoft"
 _reg = _registry.registry.register
@@ -259,15 +259,25 @@ def infer_bias_split_gelu(ctx: _context.ShapeInferenceContext, node: ir.Node) ->
 
 
 # ---------------------------------------------------------------------------
-# MatMul-like ops: GemmFastGelu, GemmFloat8
+# GemmFastGelu / GemmFloat8
 # ---------------------------------------------------------------------------
 
 
 @_reg(_MSFT, "GemmFastGelu", since_version=1)
-@_reg(_MSFT, "GemmFloat8", since_version=1)
 def _infer_gemm_like(ctx: _context.ShapeInferenceContext, node: ir.Node) -> None:
     (a, b) = _context.check_inputs(node, "X", "W")
     _matmul._matmul_shape(ctx, node, a.shape, b.shape, a.dtype)
+
+
+@_reg(_MSFT, "GemmFloat8", since_version=1)
+def infer_gemm_float8(ctx: _context.ShapeInferenceContext, node: ir.Node) -> None:
+    """Infer rank-2 Gemm with transA/transB and dtype (default FLOAT)."""
+    (a, b) = _context.check_inputs(node, "A", "B")
+    dtype_attr = node.attributes.get("dtype")
+    output_dtype = (
+        ir.DataType(dtype_attr.as_int()) if dtype_attr is not None else ir.DataType.FLOAT
+    )
+    _gemm._gemm_shape(ctx, node, a.shape, b.shape, output_dtype)
 
 
 # ---------------------------------------------------------------------------

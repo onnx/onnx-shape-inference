@@ -76,6 +76,15 @@ Optional empty output slots are not populated.
 The generated ONNX backend corpus remains enabled in full; no cases are skipped
 or filtered to achieve this coverage.
 
+## GemmFloat8 shape and output type
+
+Contrib `GemmFloat8` uses rank-2 Gemm geometry, including `transA` and `transB`
+(both default to zero). The output type comes from its `dtype` attribute, which
+defaults to FLOAT, not from either input's type. This also applies when an input
+shape is unknown. Optional bias and scale inputs do not change output geometry.
+Standard `Gemm` continues to preserve its input type, while `GemmFastGelu`
+retains MatMul's batched geometry and its activation type.
+
 ## FLOAT6 validation against upstream IR (2026-10-20)
 
 ONNX 1.23.2's `Cast-28`, `QuantizeLinear-28`, and `DequantizeLinear-28`
