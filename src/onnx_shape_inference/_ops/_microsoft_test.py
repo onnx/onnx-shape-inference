@@ -7,6 +7,7 @@ from __future__ import annotations
 import unittest
 
 import onnx_ir as ir
+import parameterized
 
 from onnx_shape_inference import OpUsageError, ShapeInferenceError
 from onnx_shape_inference._ops._testing import (
@@ -118,6 +119,123 @@ class GemmLikeTest(unittest.TestCase):
             opset_version=1,
         )
         self.assertEqual(actual, [ts(FLOAT, [4, 16])])
+
+    def test_gemm_fast_gelu_preserves_batched_shape_and_dtype(self):
+        actual = run_shape_inference(
+            MSFT,
+            "GemmFastGelu",
+            [ts(FLOAT16, ["batch", 4, 32]), ts(FLOAT16, [32, 16]), ts(FLOAT16, [16])],
+            opset_version=1,
+        )
+        self.assertEqual(actual, [ts(FLOAT16, ["batch", 4, 16])])
+
+
+class GemmFloat8Test(unittest.TestCase):
+    @parameterized.parameterized.expand(
+        [
+            ("no_transpose", [7, 5], [5, 11], 0, 0, [7, 11]),
+            ("trans_a", [5, 7], [5, 11], 1, 0, [7, 11]),
+            ("trans_b", [7, 5], [11, 5], 0, 1, [7, 11]),
+            ("both", [5, 7], [11, 5], 1, 1, [7, 11]),
+            ("nonzero", [5, 7], [11, 5], -1, 2, [7, 11]),
+            ("symbolic", [5, "M"], ["N", 5], 1, 1, ["M", "N"]),
+            ("tower_down_projection", ["tokens", 6144], [2048, 6144], 0, 1, ["tokens", 2048]),
+        ]
+    )
+    def test_transposes(self, _name, shape_a, shape_b, trans_a, trans_b, expected):
+        actual = run_shape_inference(
+            MSFT,
+            "GemmFloat8",
+            [ts(FLOAT16, shape_a), ts(FLOAT16, shape_b)],
+            {
+                "transA": ir.AttrInt64("transA", trans_a),
+                "transB": ir.AttrInt64("transB", trans_b),
+                "dtype": ir.AttrInt64("dtype", FLOAT),
+            },
+            opset_version=1,
+        )
+        self.assertEqual(actual, [ts(FLOAT, expected)])
+
+    @parameterized.parameterized.expand(
+        [
+            (input_dtype.name, input_dtype, output_dtype)
+            for input_dtype in (FLOAT, FLOAT16, ir.DataType.BFLOAT16, ir.DataType.FLOAT8E4M3FN)
+            for output_dtype in (None, FLOAT, FLOAT16, ir.DataType.BFLOAT16)
+        ]
+    )
+    def test_output_dtype(self, _name, input_dtype, output_dtype):
+        actual = run_shape_inference(
+            MSFT,
+            "GemmFloat8",
+            [ts(input_dtype, [7, 5]), ts(input_dtype, [11, 5])],
+            {
+                "transB": ir.AttrInt64("transB", 1),
+                **(
+                    {"dtype": ir.AttrInt64("dtype", output_dtype)}
+                    if output_dtype is not None
+                    else {}
+                ),
+            },
+            opset_version=1,
+        )
+        self.assertEqual(actual, [ts(output_dtype or FLOAT, [7, 11])])
+
+    def test_float8_output_and_optional_bias_scales(self):
+        actual = run_shape_inference(
+            MSFT,
+            "GemmFloat8",
+            [
+                ts(ir.DataType.FLOAT8E4M3FN, [7, 5]),
+                ts(ir.DataType.FLOAT8E5M2, [11, 5]),
+                ts(FLOAT16, [11]),
+                ts(FLOAT, []),
+                ts(FLOAT, []),
+                ts(FLOAT, []),
+            ],
+            {
+                "transB": ir.AttrInt64("transB", 1),
+                "dtype": ir.AttrInt64("dtype", ir.DataType.FLOAT8E5M2),
+            },
+            opset_version=1,
+        )
+        self.assertEqual(actual, [ts(ir.DataType.FLOAT8E5M2, [7, 11])])
+
+    @parameterized.parameterized.expand(
+        [(index, dtype) for index in (0, 1) for dtype in (None, FLOAT16)]
+    )
+    def test_unknown_shape_preserves_output_dtype(self, index, dtype):
+        inputs = [ts(FLOAT16, [7, 5]), ts(FLOAT16, [11, 5])]
+        inputs[index] = ts(FLOAT16)
+        attrs = {"transB": ir.AttrInt64("transB", 1)}
+        if dtype is not None:
+            attrs["dtype"] = ir.AttrInt64("dtype", dtype)
+        actual = run_shape_inference(MSFT, "GemmFloat8", inputs, attrs, opset_version=1)
+        self.assertEqual(actual, [ts(dtype or FLOAT)])
+
+    @parameterized.parameterized.expand(
+        [(index, shape) for index in (0, 1) for shape in ([], [5], [2, 5, 7])]
+    )
+    def test_rejects_nonmatrix_inputs(self, index, shape):
+        inputs = [ts(FLOAT16, [7, 5]), ts(FLOAT16, [5, 11])]
+        inputs[index] = ts(FLOAT16, shape)
+        with self.assertRaisesRegex(ShapeInferenceError, "must be rank 2"):
+            run_shape_inference(MSFT, "GemmFloat8", inputs, opset_version=1)
+
+    def test_contraction_mismatch_after_transpose(self):
+        with self.assertRaisesRegex(ShapeInferenceError, "contraction dimensions: 5 vs 6"):
+            run_shape_inference(
+                MSFT,
+                "GemmFloat8",
+                [ts(FLOAT16, [7, 5]), ts(FLOAT16, [11, 6])],
+                {"transB": ir.AttrInt64("transB", 1)},
+                opset_version=1,
+            )
+
+    def test_missing_input_raises(self):
+        with self.assertRaises(OpUsageError):
+            run_shape_inference(
+                MSFT, "GemmFloat8", [ts(FLOAT16, [7, 5]), None], opset_version=1
+            )
 
 
 class RotaryEmbeddingTest(unittest.TestCase):

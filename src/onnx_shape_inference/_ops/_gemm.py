@@ -23,11 +23,18 @@ def infer_gemm(ctx: _context.ShapeInferenceContext, node: ir.Node) -> None:
     Spec: https://onnx.ai/onnx/operators/onnx__Gemm.html
     """
     (input_a, input_b) = _context.check_inputs(node, "A", "B")
-
-    shape_a = input_a.shape
-    shape_b = input_b.shape
     output_dtype = input_a.dtype or input_b.dtype
+    _gemm_shape(ctx, node, input_a.shape, input_b.shape, output_dtype)
 
+
+def _gemm_shape(
+    ctx: _context.ShapeInferenceContext,
+    node: ir.Node,
+    shape_a: ir.Shape | None,
+    shape_b: ir.Shape | None,
+    output_dtype: ir.DataType | None,
+) -> None:
+    """Infer rank-2 Gemm geometry with an operator-specific output dtype."""
     if shape_a is None or shape_b is None:
         if len(node.outputs) > 0:
             ctx.set_shape_and_dtype(node.outputs[0], None, output_dtype)
