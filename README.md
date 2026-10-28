@@ -217,6 +217,16 @@ pip install -r requirements/lintrunner/requirements.txt
 lintrunner -a
 ```
 
+Python source and test files must begin with ONNX's copyright and SPDX header:
+
+```python
+# Copyright (c) ONNX Project Contributors
+#
+# SPDX-License-Identifier: Apache-2.0
+```
+
+Ruff enforces this header, including in small package and configuration files.
+
 ### Fuzzing
 
 A deterministic, seeded fuzzer stress-tests shape inference against ONNX
@@ -233,4 +243,6 @@ fuzzer's design (generator, oracles, harness, and shrinking).
 
 ## License
 
-MIT
+Licensed under the [Apache License, Version 2.0](LICENSE), using the
+[ONNX license text](https://github.com/onnx/onnx/blob/main/LICENSES/Apache-2.0.txt).
+See [NOTICE](NOTICE) for retained copyright and third-party license notices.
