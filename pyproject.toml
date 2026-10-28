@@ -1,5 +1,9 @@
+# Copyright (c) ONNX Project Contributors
+#
+# SPDX-License-Identifier: Apache-2.0
+
 [build-system]
-requires = ["setuptools>=68.0", "setuptools-scm>=8.0"]
+requires = ["setuptools>=77.0.3", "setuptools-scm>=8.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -9,6 +13,7 @@ description = 'Symbolic shape inference for ONNX models'
 readme = "README.md"
 requires-python = ">=3.9"
 license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 keywords = []
 authors = [
   { name = "Justin Chu", email = "justinchuby@users.noreply.github.com" },
@@ -57,6 +62,7 @@ target-version = "py39"
 select = [
     "B", # flake8-bugbear
     "C4", # flake8-comprehensions
+    "CPY", # flake8-copyright
     "D", # pydocstyle
     "E", # pycodestyle
     "F", # Pyflakes
@@ -111,6 +117,10 @@ ignore = [
 [tool.ruff.lint.flake8-tidy-imports]
 # Disallow all relative imports.
 ban-relative-imports = "all"
+
+[tool.ruff.lint.flake8-copyright]
+min-file-size = 0
+notice-rgx = '\A# Copyright \(c\) ONNX Project Contributors\n(?:#\n)?# SPDX-License-Identifier: Apache-2\.0\n'
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
