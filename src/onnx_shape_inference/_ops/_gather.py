@@ -51,13 +51,17 @@ def infer_gather(ctx: _context.ShapeInferenceContext, node: ir.Node) -> None:
     if len(node.outputs) > 0:
         ctx.set_shape_and_dtype(node.outputs[0], output_shape, output_dtype)
 
+        # Bound index expansion before reading either integer tensor.
+        idx_const = ir.convenience.get_const_tensor(indices)
+        if idx_const is not None and idx_const.size > _context.MAX_SYMBOLIC_ELEMENTS:
+            return
+
         # Propagate symbolic_value for gathering from a 1-D shape tensor
         sym_val = ctx.get_symbolic_value(data)
         if sym_val is not None:
             axis_attr = node.attributes.get("axis")
             axis = axis_attr.as_int() if axis_attr is not None else 0
             if axis == 0:
-                idx_const = ir.convenience.get_const_tensor(indices)
                 if idx_const is not None:
                     idx_list = [int(x) for x in idx_const.numpy().flatten()]
                     n = len(sym_val)

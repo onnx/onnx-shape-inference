@@ -5,12 +5,14 @@
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
 import numpy as np
 import onnx_ir as ir
 import parameterized
 
 from onnx_shape_inference import _context, _engine
+from onnx_shape_inference._ops import _concat, _gather
 
 
 class _CountingTensor(ir.Tensor):
@@ -21,6 +23,14 @@ class _CountingTensor(ir.Tensor):
     def numpy(self):
         self.reads += 1
         return super().numpy()
+
+
+class _CountingValues(list):
+    reads = 0
+
+    def __iter__(self):
+        self.reads += 1
+        return super().__iter__()
 
 
 class SymbolicDataBudgetTest(unittest.TestCase):
@@ -123,3 +133,124 @@ class SymbolicDataBudgetTest(unittest.TestCase):
                 self.assertEqual(result.dtype, ir.DataType.FLOAT)
                 self.assertEqual(tensor.reads > 0, count <= _context.MAX_SYMBOLIC_ELEMENTS)
                 self.assertIs(packed.const_value, tensor)
+
+    @parameterized.parameterized.expand(
+        [
+            (_context.MAX_SYMBOLIC_ELEMENTS * 2, _context.MAX_SYMBOLIC_ELEMENTS * 2),
+            (_context.MAX_SYMBOLIC_ELEMENTS, 1),
+        ]
+    )
+    def test_concat_skips_oversized_output_before_reading_inputs(self, left, right):
+        tensors = [_CountingTensor(np.zeros(n, np.int64)) for n in (left, right)]
+        inputs = [ir.val(str(i), const_value=tensor) for i, tensor in enumerate(tensors)]
+        tape = ir.tape.Tape()
+        output = tape.op("Concat", inputs, {"axis": 0})
+        ctx = _context.ShapeInferenceContext({"": 18})
+        with mock.patch.object(
+            ctx, "new_symbolic_dim", side_effect=AssertionError("Symbol allocation")
+        ):
+            _concat.infer_concat(ctx, tape.nodes[-1])
+        self.assertEqual(output.shape, [left + right])
+        self.assertEqual(output.dtype, ir.DataType.INT64)
+        self.assertEqual([tensor.reads for tensor in tensors], [0, 0])
+        self.assertNotIn(_context.SYM_DATA_KEY, output.metadata_props)
+
+    def test_concat_known_size_bound_with_unknown_output_length(self):
+        count = _context.MAX_SYMBOLIC_ELEMENTS * 2
+        tensor = _CountingTensor(np.zeros(count, np.int64))
+        inputs = [
+            ir.val("large", const_value=tensor),
+            ir.val("dynamic", dtype=ir.DataType.INT64, shape=["n"]),
+        ]
+        tape = ir.tape.Tape()
+        output = tape.op("Concat", inputs, {"axis": 0})
+        ctx = _context.ShapeInferenceContext({"": 18})
+        with mock.patch.object(
+            ctx, "new_symbolic_dim", side_effect=AssertionError("Symbol allocation")
+        ):
+            _concat.infer_concat(ctx, tape.nodes[-1])
+        self.assertEqual(output.shape, [count + ir.SymbolicDim("n")])
+        self.assertEqual(output.dtype, ir.DataType.INT64)
+        self.assertEqual(tensor.reads, 0)
+
+    def test_concat_keeps_partial_data_at_the_limit(self):
+        count = _context.MAX_SYMBOLIC_ELEMENTS
+        inputs = [
+            ir.val("unknown", dtype=ir.DataType.INT64, shape=[count - 1]),
+            ir.val("known", const_value=ir.tensor(np.array([7], np.int64))),
+        ]
+        tape = ir.tape.Tape()
+        output = tape.op("Concat", inputs, {"axis": 0})
+        ctx = _context.ShapeInferenceContext({"": 18})
+        _concat.infer_concat(ctx, tape.nodes[-1])
+        values = ctx.get_symbolic_value(output)
+        self.assertEqual(len(values), count)
+        self.assertTrue(all(isinstance(value, ir.SymbolicDim) for value in values[:-1]))
+        self.assertEqual(values[-1], 7)
+
+    @parameterized.parameterized.expand(
+        [
+            ((_context.MAX_SYMBOLIC_ELEMENTS + 1,),),
+            ((_context.MAX_SYMBOLIC_ELEMENTS // 2 + 1, 2),),
+        ]
+    )
+    def test_gather_does_not_read_oversized_indices(self, shape):
+        table = _CountingTensor(np.array([5, 7], np.int64))
+        indices = _CountingTensor(np.zeros(shape, np.int64))
+        tape = ir.tape.Tape()
+        output = tape.op(
+            "Gather",
+            [ir.val("table", const_value=table), ir.val("indices", const_value=indices)],
+        )
+        ctx = _context.ShapeInferenceContext({"": 18})
+        _gather.infer_gather(ctx, tape.nodes[-1])
+        self.assertEqual(output.shape, list(shape))
+        self.assertEqual(output.dtype, ir.DataType.INT64)
+        self.assertEqual(indices.reads, 0)
+        self.assertEqual(table.reads, 0)
+        self.assertNotIn(_context.SYM_DATA_KEY, output.metadata_props)
+
+    def test_gather_propagates_at_the_limit(self):
+        count = _context.MAX_SYMBOLIC_ELEMENTS
+        indices = _CountingTensor(np.zeros(count, np.int64))
+        tape = ir.tape.Tape()
+        output = tape.op(
+            "Gather",
+            [
+                ir.val("table", const_value=ir.tensor(np.array([5, 7], np.int64))),
+                ir.val("indices", const_value=indices),
+            ],
+        )
+        ctx = _context.ShapeInferenceContext({"": 18})
+        _gather.infer_gather(ctx, tape.nodes[-1])
+        self.assertEqual(ctx.get_symbolic_value(output), [5] * count)
+        self.assertGreater(indices.reads, 0)
+
+    def test_concat_bounds_known_data_with_symbolic_lengths(self):
+        ctx = _context.ShapeInferenceContext({"": 18})
+        left = ir.val("left", dtype=ir.DataType.INT64, shape=["n"])
+        right = ir.val("right", dtype=ir.DataType.INT64, shape=["m"])
+        ctx.set_symbolic_value(left, [ir.SymbolicDim("x")] * _context.MAX_SYMBOLIC_ELEMENTS)
+        tail = _CountingValues([ir.SymbolicDim("y")])
+        ctx.set_symbolic_value(right, tail)
+        tail.reads = 0
+        tape = ir.tape.Tape()
+        output = tape.op("Concat", [left, right], {"axis": 0})
+        _concat.infer_concat(ctx, tape.nodes[-1])
+        self.assertEqual(output.shape, [ir.SymbolicDim("n") + ir.SymbolicDim("m")])
+        self.assertEqual(tail.reads, 0)
+        self.assertNotIn(_context.SYM_DATA_KEY, output.metadata_props)
+
+    def test_concat_bounds_fallback_after_known_symbolic_data(self):
+        ctx = _context.ShapeInferenceContext({"": 18})
+        left = ir.val("left", dtype=ir.DataType.INT64, shape=["n"])
+        right = ir.val("right", dtype=ir.DataType.INT64, shape=[1])
+        ctx.set_symbolic_value(left, [ir.SymbolicDim("x")] * _context.MAX_SYMBOLIC_ELEMENTS)
+        tape = ir.tape.Tape()
+        output = tape.op("Concat", [left, right], {"axis": 0})
+        with mock.patch.object(
+            ctx, "new_symbolic_dim", side_effect=AssertionError("Symbol allocation")
+        ):
+            _concat.infer_concat(ctx, tape.nodes[-1])
+        self.assertEqual(output.shape, [ir.SymbolicDim("n") + 1])
+        self.assertNotIn(_context.SYM_DATA_KEY, output.metadata_props)
