@@ -80,9 +80,12 @@ def infer_concat(ctx: _context.ShapeInferenceContext, node: ir.Node) -> None:
         # rather than abandoning propagation entirely — this keeps the
         # surrounding known elements available downstream (e.g. a shape tensor
         # ``[B, H, <unknown>, S, D]`` built by Concat for a later Reshape /
-        # Expand).  Propagation is only skipped when a segment length itself is
-        # unknown.
+        # Expand). Unknown segment lengths and oversized outputs stop propagation.
         if rank == 1 and axis == 0:
+            # The known lengths bound the output even when other lengths are symbolic.
+            known_length = sum(d for shape in shapes for d in shape if isinstance(d, int))
+            if known_length > _context.MAX_SYMBOLIC_ELEMENTS:
+                return
             # All inputs are guaranteed non-None here (the shape-collection loop
             # above raises for any None input).
             combined: list[int | ir.SymbolicDim] = []
@@ -90,11 +93,15 @@ def infer_concat(ctx: _context.ShapeInferenceContext, node: ir.Node) -> None:
             for inp in node.inputs:
                 sv = ctx.get_symbolic_value(inp)
                 if sv is not None:
+                    if len(combined) + len(sv) > _context.MAX_SYMBOLIC_ELEMENTS:
+                        return
                     combined.extend(sv)
                     continue
                 # No known values: fall back to the input's own length.
                 length = inp.shape[0] if inp.shape is not None else None
                 if isinstance(length, int):
+                    if len(combined) + length > _context.MAX_SYMBOLIC_ELEMENTS:
+                        return
                     combined.extend(ctx.new_symbolic_dim() for _ in range(length))
                 else:
                     propagate = False

@@ -144,6 +144,10 @@ non-constant shape tensors that were computed at runtime (e.g. `Shape → Slice 
 The **sym_data** feature bridges this gap by tracking the known element values of
 1-D integer tensors as they flow through the graph.
 
+Propagation tracks up to 1024 integer elements per tensor, including inside local
+functions. Larger tensors retain shape and dtype inference without expanding
+their contents into Python lists and JSON metadata.
+
 After inference, each value that carries propagated data has a
 `pkg.onnx_shape_inference.sym_data` entry in its `metadata_props`. You can read
 it directly or use the `SYM_DATA_KEY` constant:
