@@ -24,74 +24,69 @@ class _CountingTensor(ir.Tensor):
 
 
 class SymbolicDataBudgetTest(unittest.TestCase):
-    @parameterized.parameterized.expand([(-1,), (True,), (1.5,), ("1024",)])
-    def test_invalid_limit(self, limit):
-        with self.assertRaisesRegex(ValueError, "max_symbolic_elements"):
-            _context.ShapeInferenceContext(max_symbolic_elements=limit)
-
     def test_large_constant_is_not_materialized(self):
-        tensor = _CountingTensor(np.zeros(2048, np.uint8))
+        tensor = _CountingTensor(np.zeros(_context.MAX_SYMBOLIC_ELEMENTS + 1, np.uint8))
         value = ir.val("packed", const_value=tensor)
         ctx = _context.ShapeInferenceContext()
         self.assertIsNone(ctx.get_symbolic_value(value))
         self.assertEqual(tensor.reads, 0)
         self.assertIs(value.const_value, tensor)
 
-    def test_limit_boundary_and_unlimited(self):
-        tensor = _CountingTensor(np.arange(9, dtype=np.int64))
+    @parameterized.parameterized.expand(
+        [(_context.MAX_SYMBOLIC_ELEMENTS,), (_context.MAX_SYMBOLIC_ELEMENTS + 1,)]
+    )
+    def test_limit_boundary(self, count):
+        tensor = _CountingTensor(np.arange(count, dtype=np.int64))
         value = ir.val("shape", const_value=tensor)
-        self.assertIsNone(
-            _context.ShapeInferenceContext(max_symbolic_elements=8).get_symbolic_value(value)
-        )
-        for limit in (9, None):
-            ctx = _context.ShapeInferenceContext(max_symbolic_elements=limit)
-            self.assertEqual(ctx.get_symbolic_value(value), list(range(9)))
-            self.assertEqual(ctx.create_child().max_symbolic_elements, limit)
+        result = _context.ShapeInferenceContext().get_symbolic_value(value)
+        if count <= _context.MAX_SYMBOLIC_ELEMENTS:
+            self.assertEqual(result, list(range(count)))
+            self.assertGreater(tensor.reads, 0)
+        else:
+            self.assertIsNone(result)
+            self.assertEqual(tensor.reads, 0)
 
     def test_oversized_results_clear_stale_metadata(self):
-        ctx = _context.ShapeInferenceContext(max_symbolic_elements=2)
-        value = ir.val("shape", dtype=ir.DataType.INT64, shape=[3])
+        ctx = _context.ShapeInferenceContext()
+        value = ir.val("shape", dtype=ir.DataType.INT64, shape=[1])
         ctx.set_symbolic_value(value, [ir.SymbolicDim("a")])
         self.assertIn(_context.SYM_DATA_KEY, value.metadata_props)
-        ctx.set_symbolic_value(value, [1, 2, 3])
+        count = _context.MAX_SYMBOLIC_ELEMENTS + 1
+        value.shape = ir.Shape([count])
+        ctx.set_symbolic_value(value, list(range(count)))
         self.assertNotIn(_context.SYM_DATA_KEY, value.metadata_props)
         self.assertIsNone(ctx.get_symbolic_value(value))
         self.assertIsNone(value.const_value)
 
-    def test_empty_data_with_zero_budget(self):
-        ctx = _context.ShapeInferenceContext(max_symbolic_elements=0)
-        value = ir.val("empty", const_value=ir.tensor(np.empty(0, np.int64)))
-        self.assertEqual(ctx.get_symbolic_value(value), [])
-        scalar = ir.val("scalar", const_value=ir.tensor(np.array(1, np.int64)))
-        self.assertIsNone(ctx.get_symbolic_value(scalar))
+    def test_scalars_and_empty_data(self):
+        ctx = _context.ShapeInferenceContext()
+        for array, expected in [(np.array(1, np.int64), [1]), (np.empty(0, np.int64), [])]:
+            with self.subTest(shape=array.shape):
+                value = ir.val("value", const_value=ir.tensor(array))
+                self.assertEqual(ctx.get_symbolic_value(value), expected)
 
     def test_cast_keeps_shape_and_bounds_metadata(self):
-        for limit in (1024, None):
-            with self.subTest(limit=limit):
-                tensor = _CountingTensor(np.zeros(2048, np.uint8))
-                packed = ir.val("packed", const_value=tensor)
-                tape = ir.tape.Tape()
-                output = tape.op("Cast", [packed], {"to": int(ir.DataType.INT64)})
-                model = ir.Model(
-                    ir.Graph(
-                        [],
-                        [output],
-                        nodes=tape.nodes,
-                        initializers=[packed],
-                        opset_imports={"": 18},
-                    ),
-                    ir_version=10,
-                )
-                _engine.infer_symbolic_shapes(model, max_symbolic_elements=limit)
-                self.assertEqual(output.shape, [2048])
-                self.assertEqual(output.dtype, ir.DataType.INT64)
-                self.assertEqual(tensor.reads > 0, limit is None)
-                self.assertEqual(_context.SYM_DATA_KEY in output.metadata_props, limit is None)
+        count = _context.MAX_SYMBOLIC_ELEMENTS * 2
+        tensor = _CountingTensor(np.zeros(count, np.uint8))
+        packed = ir.val("packed", const_value=tensor)
+        tape = ir.tape.Tape()
+        output = tape.op("Cast", [packed], {"to": int(ir.DataType.INT64)})
+        model = ir.Model(
+            ir.Graph(
+                [], [output], nodes=tape.nodes, initializers=[packed], opset_imports={"": 18}
+            ),
+            ir_version=10,
+        )
+        _engine.infer_symbolic_shapes(model)
+        self.assertEqual(output.shape, [count])
+        self.assertEqual(output.dtype, ir.DataType.INT64)
+        self.assertEqual(tensor.reads, 0)
+        self.assertNotIn(_context.SYM_DATA_KEY, output.metadata_props)
 
     def test_function_budget_preserves_shape_program(self):
-        for limit in (1024, None):
-            with self.subTest(limit=limit):
-                arg = ir.val("packed", dtype=ir.DataType.UINT8, shape=[4096])
+        for count in (64, _context.MAX_SYMBOLIC_ELEMENTS * 2):
+            with self.subTest(count=count):
+                arg = ir.val("packed", dtype=ir.DataType.UINT8, shape=[count])
                 tape = ir.tape.Tape()
                 indices = tape.op("Cast", [arg], {"to": int(ir.DataType.INT64)})
                 table = tape.op(
@@ -99,7 +94,7 @@ class SymbolicDataBudgetTest(unittest.TestCase):
                 )
                 decoded = tape.op("Gather", [table, indices])
                 shape = tape.op(
-                    "Constant", [], {"value": ir.tensor(np.array([64, 64], np.int64))}
+                    "Constant", [], {"value": ir.tensor(np.array([count // 2, 2], np.int64))}
                 )
                 output = tape.op("Reshape", [decoded, shape])
                 function = ir.Function(
@@ -108,7 +103,7 @@ class SymbolicDataBudgetTest(unittest.TestCase):
                     graph=ir.Graph([arg], [output], nodes=tape.nodes, opset_imports={"": 18}),
                     attributes=[],
                 )
-                tensor = _CountingTensor(np.zeros(4096, np.uint8))
+                tensor = _CountingTensor(np.zeros(count, np.uint8))
                 packed = ir.val("weights", const_value=tensor)
                 outer = ir.tape.Tape()
                 result = outer.op("Decode", [packed], domain="test")
@@ -123,8 +118,8 @@ class SymbolicDataBudgetTest(unittest.TestCase):
                     functions=[function],
                     ir_version=10,
                 )
-                _engine.infer_symbolic_shapes(model, max_symbolic_elements=limit)
-                self.assertEqual(result.shape, [64, 64])
+                _engine.infer_symbolic_shapes(model)
+                self.assertEqual(result.shape, [count // 2, 2])
                 self.assertEqual(result.dtype, ir.DataType.FLOAT)
-                self.assertEqual(tensor.reads > 0, limit is None)
+                self.assertEqual(tensor.reads > 0, count <= _context.MAX_SYMBOLIC_ELEMENTS)
                 self.assertIs(packed.const_value, tensor)

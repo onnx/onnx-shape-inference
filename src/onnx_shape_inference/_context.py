@@ -25,6 +25,9 @@ logger = logging.getLogger(__name__)
 
 SYM_DATA_KEY = "pkg.onnx_shape_inference.sym_data"
 
+# Shape programs use short vectors; packed weights and index arrays stay as tensors.
+MAX_SYMBOLIC_ELEMENTS = 1024
+
 # Engine-generated anonymous dimension names (see
 # :meth:`ShapeInferenceContext.new_symbolic_dim`).  These are placeholders for
 # genuinely data-dependent dims and are the only symbols the anchor/constraint
@@ -246,7 +249,6 @@ class ShapeInferenceContext:
         resolved_attrs: dict[str, ir.Attr] | None = None,
         *,
         allocator: _SymbolAllocator | None = None,
-        max_symbolic_elements: int | None = 1024,
     ) -> None:
         """Initialize the shape inference context.
 
@@ -264,18 +266,7 @@ class ShapeInferenceContext:
                 :class:`_SymbolAllocator`; child contexts for function bodies pass
                 the parent's allocator (via :meth:`create_child`) so reserved and
                 generated names are shared across the whole context tree.
-            max_symbolic_elements: Maximum element count for propagated integer
-                data, including constant reads and serialized metadata. Defaults
-                to 1024. Use ``None`` for unlimited propagation. Shape and dtype
-                inference still run for larger tensors.
         """
-        if max_symbolic_elements is not None and (
-            isinstance(max_symbolic_elements, bool)
-            or not isinstance(max_symbolic_elements, int)
-            or max_symbolic_elements < 0
-        ):
-            raise ValueError("max_symbolic_elements must be a nonnegative integer or None")
-        self.max_symbolic_elements = max_symbolic_elements
         self.opset_imports: Mapping[str, int] = opset_imports or {"": 1}
         self.policy = policy
         self.resolved_attrs: dict[str, ir.Attr] | None = resolved_attrs
@@ -325,7 +316,6 @@ class ShapeInferenceContext:
             policy=self.policy,
             resolved_attrs=resolved_attrs,
             allocator=self._allocator,
-            max_symbolic_elements=self.max_symbolic_elements,
         )
 
     @property
@@ -797,7 +787,7 @@ class ShapeInferenceContext:
             value: The value to annotate.
             data: A list of known element values (int or SymbolicDim).
         """
-        if self.max_symbolic_elements is not None and len(data) > self.max_symbolic_elements:
+        if len(data) > MAX_SYMBOLIC_ELEMENTS:
             self._symbolic_values.pop(value, None)
             value.metadata_props.pop(SYM_DATA_KEY, None)
             return
@@ -853,9 +843,7 @@ class ShapeInferenceContext:
         if (
             const is not None
             and len(const.shape) <= 1
-            and (
-                self.max_symbolic_elements is None or const.size <= self.max_symbolic_elements
-            )
+            and const.size <= MAX_SYMBOLIC_ELEMENTS
             and value.dtype
             in (
                 ir.DataType.INT64,
