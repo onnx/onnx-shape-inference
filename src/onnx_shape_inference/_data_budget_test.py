@@ -56,10 +56,11 @@ class SymbolicDataBudgetTest(unittest.TestCase):
             self.assertIsNone(result)
             self.assertEqual(tensor.reads, 0)
 
-    def test_oversized_results_clear_stale_metadata(self):
+    @parameterized.parameterized.expand([(False,), (True,)])
+    def test_oversized_results_clear_stale_metadata(self, concrete):
         ctx = _context.ShapeInferenceContext()
         value = ir.val("shape", dtype=ir.DataType.INT64, shape=[1])
-        ctx.set_symbolic_value(value, [ir.SymbolicDim("a")])
+        ctx.set_symbolic_value(value, [7] if concrete else [ir.SymbolicDim("a")])
         self.assertIn(_context.SYM_DATA_KEY, value.metadata_props)
         count = _context.MAX_SYMBOLIC_ELEMENTS + 1
         value.shape = ir.Shape([count])
@@ -67,6 +68,37 @@ class SymbolicDataBudgetTest(unittest.TestCase):
         self.assertNotIn(_context.SYM_DATA_KEY, value.metadata_props)
         self.assertIsNone(ctx.get_symbolic_value(value))
         self.assertIsNone(value.const_value)
+
+    @parameterized.parameterized.expand([([8],), ([ir.SymbolicDim("a")],)])
+    def test_updated_results_replace_propagated_constant(self, data):
+        ctx = _context.ShapeInferenceContext()
+        value = ir.val("shape", dtype=ir.DataType.INT64, shape=[1])
+        ctx.set_symbolic_value(value, [7])
+        ctx.set_symbolic_value(value, data)
+        self.assertEqual(ctx.get_symbolic_value(value), data)
+        if isinstance(data[0], int):
+            np.testing.assert_array_equal(value.const_value.numpy(), data)
+        else:
+            self.assertIsNone(value.const_value)
+
+    def test_oversized_results_preserve_original_constant(self):
+        ctx = _context.ShapeInferenceContext()
+        original = ir.tensor(np.array([7], np.int64))
+        value = ir.val("original", const_value=original)
+        ctx.set_symbolic_value(value, [7])
+        ctx.set_symbolic_value(value, list(range(_context.MAX_SYMBOLIC_ELEMENTS + 1)))
+        self.assertIs(value.const_value, original)
+        self.assertEqual(ctx.get_symbolic_value(value), [7])
+
+    def test_oversized_results_preserve_replaced_constant(self):
+        ctx = _context.ShapeInferenceContext()
+        value = ir.val("shape", dtype=ir.DataType.INT64, shape=[1])
+        ctx.set_symbolic_value(value, [7])
+        replacement = ir.tensor(np.array([9], np.int64))
+        value.const_value = replacement
+        ctx.set_symbolic_value(value, list(range(_context.MAX_SYMBOLIC_ELEMENTS + 1)))
+        self.assertIs(value.const_value, replacement)
+        self.assertEqual(ctx.get_symbolic_value(value), [9])
 
     def test_scalars_and_empty_data(self):
         ctx = _context.ShapeInferenceContext()

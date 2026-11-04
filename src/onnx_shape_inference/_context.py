@@ -279,6 +279,7 @@ class ShapeInferenceContext:
         self._allocator: _SymbolAllocator = allocator or _SymbolAllocator()
         # Partial data propagation: symbolic element values keyed by ir.Value
         self._symbolic_values: dict[ir.Value, list[int | ir.SymbolicDim]] = {}
+        self._propagated_constants: dict[ir.Value, ir.TensorProtocol] = {}
         # Symbolic-dimension equality constraints discovered during inference,
         # stored as canonical ``(a_str, b_str)`` string pairs.  These relate an
         # engine-inferred expression to a user-declared (anchor) expression and
@@ -787,6 +788,11 @@ class ShapeInferenceContext:
             value: The value to annotate.
             data: A list of known element values (int or SymbolicDim).
         """
+        # Invalidate only constants synthesized by this context. Model constants
+        # and constants replaced by callers retain their original ownership.
+        previous = self._propagated_constants.pop(value, None)
+        if previous is not None and value.const_value is previous:
+            value.const_value = None
         if len(data) > MAX_SYMBOLIC_ELEMENTS:
             self._symbolic_values.pop(value, None)
             value.metadata_props.pop(SYM_DATA_KEY, None)
@@ -816,6 +822,7 @@ class ShapeInferenceContext:
             else:
                 logger.debug("Setting const_value for %s to %s", value.name, data)
             value.const_value = ir.tensor(data, dtype=dtype, name=value.name)
+            self._propagated_constants[value] = value.const_value
 
     def get_symbolic_value(
         self,
