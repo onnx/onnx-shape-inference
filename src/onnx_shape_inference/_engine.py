@@ -34,6 +34,7 @@ def infer_symbolic_shapes(
     policy: _context.ShapeMergePolicy = "refine",
     warn_on_missing: bool = True,
     adopt_declared_symbols: bool = True,
+    max_symbolic_elements: int | None = 1024,
 ) -> ir.Model:
     """Perform symbolic shape inference on the model.
 
@@ -53,6 +54,11 @@ def infer_symbolic_shapes(
             names wherever an equality was discovered (see
             :mod:`onnx_shape_inference._constraints`).  Set to ``False`` to keep
             the raw engine-generated symbols.
+        max_symbolic_elements: Maximum element count for propagated integer data
+            per tensor (default 1024). Larger tensors retain shape/dtype inference
+            without expanding their contents into Python lists or JSON metadata.
+            Set ``None`` for unlimited propagation or ``0`` to disable nonempty
+            data propagation. The limit also applies inside local functions.
 
     Returns:
         The same *model* object, with shapes updated in place.
@@ -70,6 +76,7 @@ def infer_symbolic_shapes(
         policy=policy,
         warn_on_missing=warn_on_missing,
         adopt_declared_symbols=adopt_declared_symbols,
+        max_symbolic_elements=max_symbolic_elements,
     )
     return model
 
@@ -80,11 +87,14 @@ def _infer_symbolic_shapes(
     policy: _context.ShapeMergePolicy = "refine",
     warn_on_missing: bool = True,
     adopt_declared_symbols: bool = True,
+    max_symbolic_elements: int | None = 1024,
 ) -> bool:
     """Core implementation that returns whether the model was modified."""
     _registry.registry.collect()
 
-    ctx = _context.ShapeInferenceContext(model.opset_imports, policy=policy)
+    ctx = _context.ShapeInferenceContext(
+        model.opset_imports, policy=policy, max_symbolic_elements=max_symbolic_elements
+    )
     # Reserve every symbol name already present in the model so that anonymous
     # dims minted during inference can never collide with an author-declared
     # symbol (and thus never be mistaken for one by the anchor/constraint pass).

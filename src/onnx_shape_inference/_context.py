@@ -246,6 +246,7 @@ class ShapeInferenceContext:
         resolved_attrs: dict[str, ir.Attr] | None = None,
         *,
         allocator: _SymbolAllocator | None = None,
+        max_symbolic_elements: int | None = 1024,
     ) -> None:
         """Initialize the shape inference context.
 
@@ -263,7 +264,18 @@ class ShapeInferenceContext:
                 :class:`_SymbolAllocator`; child contexts for function bodies pass
                 the parent's allocator (via :meth:`create_child`) so reserved and
                 generated names are shared across the whole context tree.
+            max_symbolic_elements: Maximum element count for propagated integer
+                data, including constant reads and serialized metadata. Defaults
+                to 1024. Use ``None`` for unlimited propagation. Shape and dtype
+                inference still run for larger tensors.
         """
+        if max_symbolic_elements is not None and (
+            isinstance(max_symbolic_elements, bool)
+            or not isinstance(max_symbolic_elements, int)
+            or max_symbolic_elements < 0
+        ):
+            raise ValueError("max_symbolic_elements must be a nonnegative integer or None")
+        self.max_symbolic_elements = max_symbolic_elements
         self.opset_imports: Mapping[str, int] = opset_imports or {"": 1}
         self.policy = policy
         self.resolved_attrs: dict[str, ir.Attr] | None = resolved_attrs
@@ -313,6 +325,7 @@ class ShapeInferenceContext:
             policy=self.policy,
             resolved_attrs=resolved_attrs,
             allocator=self._allocator,
+            max_symbolic_elements=self.max_symbolic_elements,
         )
 
     @property
@@ -784,6 +797,10 @@ class ShapeInferenceContext:
             value: The value to annotate.
             data: A list of known element values (int or SymbolicDim).
         """
+        if self.max_symbolic_elements is not None and len(data) > self.max_symbolic_elements:
+            self._symbolic_values.pop(value, None)
+            value.metadata_props.pop(SYM_DATA_KEY, None)
+            return
         self._symbolic_values[value] = data
         # Call it sym_data because it is always 1d list even for scalars
         value.metadata_props[SYM_DATA_KEY] = json.dumps(
@@ -836,6 +853,9 @@ class ShapeInferenceContext:
         if (
             const is not None
             and len(const.shape) <= 1
+            and (
+                self.max_symbolic_elements is None or const.size <= self.max_symbolic_elements
+            )
             and value.dtype
             in (
                 ir.DataType.INT64,
