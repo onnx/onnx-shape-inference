@@ -420,8 +420,8 @@ class ShapeInferenceContext:
         The pair is stored as strings and later resolved by the engine's
         anchor/constraint pass, which renames engine-anonymous ``_dN`` symbols
         to the user-visible names on the other side of the equality.  Ops may
-        call this directly (e.g. a broadcast of two differing symbolic dims, or
-        an ``If`` merging two branch dims) to relate the symbols they produce.
+        call this directly (e.g. MatMul contracting dimensions) to relate the
+        symbols they produce.
 
         Concrete-int operands and trivial ``a == a`` pairs are ignored.
         """

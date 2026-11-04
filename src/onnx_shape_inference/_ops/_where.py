@@ -27,8 +27,8 @@ def infer_where(ctx: _context.ShapeInferenceContext, node: ir.Node) -> None:
     output_dtype = x.dtype or y.dtype
 
     # Broadcast all three shapes
-    shape_xy = _broadcast.broadcast_shapes(x.shape, y.shape)
-    output_shape = _broadcast.broadcast_shapes(shape_xy, condition.shape)
+    shape_xy = _broadcast._broadcast_shapes(x.shape, y.shape, ctx=ctx)
+    output_shape = _broadcast._broadcast_shapes(shape_xy, condition.shape, ctx=ctx)
 
     if len(node.outputs) > 0:
         ctx.set_shape_and_dtype(node.outputs[0], output_shape, output_dtype)

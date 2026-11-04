@@ -1425,7 +1425,7 @@ def _qlinear_binary_shape(ctx: _context.ShapeInferenceContext, node: ir.Node) ->
     b = node.inputs[3]
     from onnx_shape_inference import _broadcast
 
-    output_shape = _broadcast.broadcast_shapes(a.shape, b.shape)
+    output_shape = _broadcast._broadcast_shapes(a.shape, b.shape, ctx=ctx)
     output_dtype = a.dtype
     if output_dtype is None:
         a_zp = node.inputs[2] if len(node.inputs) > 2 and node.inputs[2] is not None else None
@@ -1583,9 +1583,9 @@ def infer_qlinear_where(ctx: _context.ShapeInferenceContext, node: ir.Node) -> N
 
     output_shape = condition.shape
     if x is not None:
-        output_shape = _broadcast.broadcast_shapes(output_shape, x.shape)
+        output_shape = _broadcast._broadcast_shapes(output_shape, x.shape, ctx=ctx)
     if y is not None:
-        output_shape = _broadcast.broadcast_shapes(output_shape, y.shape)
+        output_shape = _broadcast._broadcast_shapes(output_shape, y.shape, ctx=ctx)
 
     output_dtype = x.dtype if x is not None else None
     if output_dtype is None and x is not None:

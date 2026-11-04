@@ -37,7 +37,7 @@ def infer_expand(ctx: _context.ShapeInferenceContext, node: ir.Node) -> None:
 
     output_shape: ir.Shape | None = None
     if input_shape is not None and target_shape is not None:
-        output_shape = _broadcast.broadcast_shapes(input_shape, target_shape)
+        output_shape = _broadcast._broadcast_shapes(input_shape, target_shape, ctx=ctx)
     elif target_shape is not None:
         output_shape = target_shape
 

@@ -10,42 +10,47 @@ __all__ = [
 
 import onnx_ir as ir
 
+from onnx_shape_inference import _context
+
 
 def broadcast_shapes(
     shape1: ir.Shape | None,
     shape2: ir.Shape | None,
 ) -> ir.Shape | None:
-    """Compute the broadcast shape of two shapes following NumPy broadcasting rules.
+    """Compute a broadcast shape following NumPy broadcasting rules.
 
-    Broadcasting rules:
-    1. If shapes have different ranks, prepend 1s to the shorter shape.
-    2. For each dimension pair:
-       - If both are equal, use that value.
-       - If one is 1, use the other value.
-       - If one is symbolic and one is 1, use the symbolic value.
-       - If both are symbolic and equal, use that value.
-       - If both are different non-1 values, broadcasting fails.
+    Equal dimensions and singleton axes determine the result. Different
+    concrete non-singleton dimensions are incompatible. Unrelated symbolic
+    axes remain unresolved because either can be a runtime singleton.
 
     Args:
         shape1: First shape (can be None if unknown).
         shape2: Second shape (can be None if unknown).
 
     Returns:
-        The broadcasted shape, or None if shapes are incompatible or unknown.
+        The broadcasted shape, or None for incompatible or unresolved shapes.
+        Inference handlers use the context-aware helper to retain known axes
+        and allocate unique symbols for the unresolved axes.
 
     Example::
 
-        >>> import onnx_ir as ir
-        >>> s1 = ir.Shape([3, 1, 5])
-        >>> s2 = ir.Shape([1, 4, 5])
-        >>> broadcast_shapes(s1, s2)
+        >>> broadcast_shapes(ir.Shape([3, 1, 5]), ir.Shape([1, 4, 5]))
         Shape([3, 4, 5])
-
-        >>> s1 = ir.Shape(["batch", 1, 256])
-        >>> s2 = ir.Shape([1, "seq_len", 256])
-        >>> broadcast_shapes(s1, s2)
-        Shape([SymbolicDim('batch'), SymbolicDim('seq_len'), 256])
+        >>> broadcast_shapes(ir.Shape(["batch", 1]), ir.Shape([1, "width"]))
+        Shape([SymbolicDim('batch'), SymbolicDim('width')])
+        >>> broadcast_shapes(ir.Shape(["N", 4]), ir.Shape(["M", 4])) is None
+        True
     """
+    return _broadcast_shapes(shape1, shape2)
+
+
+def _broadcast_shapes(
+    shape1: ir.Shape | None,
+    shape2: ir.Shape | None,
+    *,
+    ctx: _context.ShapeInferenceContext | None = None,
+) -> ir.Shape | None:
+    """Retain unresolved axes using the inference context's symbol allocator."""
     if shape1 is None or shape2 is None:
         return None
 
@@ -62,11 +67,25 @@ def broadcast_shapes(
         dims2.insert(0, 1)
 
     result_dims: list[int | ir.SymbolicDim] = []
+    equalities = (
+        {frozenset(pair) for pair in ctx.symbolic_equalities} if ctx is not None else set()
+    )
 
     for d1, d2 in zip(dims1, dims2):
         broadcasted = _broadcast_dim(d1, d2)
         if broadcasted is None:
-            return None  # Broadcasting failed
+            if ctx is None or (isinstance(d1, int) and isinstance(d2, int)):
+                return None
+            if frozenset((str(d1), str(d2))) in equalities:
+                # Prefer a model author's name over a generated placeholder.
+                broadcasted = (
+                    d2
+                    if ctx.is_generated_symbol(str(d1))
+                    and not ctx.is_generated_symbol(str(d2))
+                    else d1
+                )
+            else:
+                broadcasted = ctx.new_symbolic_dim()
         result_dims.append(broadcasted)
 
     return ir.Shape(result_dims)
@@ -104,20 +123,9 @@ def _broadcast_dim(
     if isinstance(dim2, int) and isinstance(dim1, ir.SymbolicDim):
         return dim2
 
-    # Both symbolic
+    # A named symbol denotes one runtime extent. Independent symbols may each
+    # be 1, so compatibility alone does not establish equality with either.
     if isinstance(dim1, ir.SymbolicDim) and isinstance(dim2, ir.SymbolicDim):
-        # Check if they're equal (same expression)
-        if dim1._expr is not None and dim2._expr is not None:
-            if dim1._expr == dim2._expr:
-                return dim1
-        # If one is unknown (None), use the other
-        if dim1.value is None:
-            return dim2
-        if dim2.value is None:
+        if dim1.value is not None and dim2.value is not None and dim1 == dim2:
             return dim1
-        # Both are named but different - assume compatible, pick first
-        # This is a simplification; in strict mode we might want to fail
-        return dim1
-
-    # Fallback: return first dim (assume compatible)
-    return dim1
+    return None
