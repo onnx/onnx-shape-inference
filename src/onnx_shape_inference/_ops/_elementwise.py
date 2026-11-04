@@ -99,7 +99,7 @@ def infer_binary_elementwise(
     """
     (input_a, input_b) = _context.check_inputs(node, "A", "B")
 
-    output_shape = _broadcast.broadcast_shapes(input_a.shape, input_b.shape)
+    output_shape = _broadcast._broadcast_shapes(input_a.shape, input_b.shape, ctx=ctx)
     output_dtype = output_dtype_override or input_a.dtype or input_b.dtype
 
     if len(node.outputs) > 0:
@@ -245,7 +245,7 @@ def _infer_variadic_elementwise(ctx: _context.ShapeInferenceContext, node: ir.No
     output_dtype = inputs[0].dtype
     output_shape = inputs[0].shape
     for inp in inputs[1:]:
-        output_shape = _broadcast.broadcast_shapes(output_shape, inp.shape)
+        output_shape = _broadcast._broadcast_shapes(output_shape, inp.shape, ctx=ctx)
 
     if len(node.outputs) > 0:
         ctx.set_shape_and_dtype(node.outputs[0], output_shape, output_dtype)

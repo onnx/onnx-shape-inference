@@ -72,12 +72,12 @@ class WhereTest(unittest.TestCase):
         )
         self.assertEqual(actual, [ts(FLOAT, ["N", "M"])])
 
-    def test_data_symbols_preferred_over_generated_condition_symbols(self):
+    def test_independent_condition_symbols_need_fresh_dims(self):
         actual = run_shape_inference(
             "",
             "Where",
             [
-                ts(BOOL, ["_d0", 16, "_d1", "_d2"]),
+                ts(BOOL, ["condition_batch", 16, "condition_sequence", "condition_total"]),
                 ts(FLOAT, ["batch_size", 16, "sequence_length", "total_sequence_length"]),
                 ts(FLOAT, []),
             ],
@@ -88,7 +88,7 @@ class WhereTest(unittest.TestCase):
             [
                 ts(
                     FLOAT,
-                    ["batch_size", 16, "sequence_length", "total_sequence_length"],
+                    ["_d0", 16, "_d1", "_d2"],
                 )
             ],
         )
