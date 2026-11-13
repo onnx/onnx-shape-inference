@@ -572,6 +572,25 @@ class CausalConvWithStateTest(unittest.TestCase):
 
 
 class ConvOpset29Test(unittest.TestCase):
+    @parameterized.parameterized.expand([("concrete_length", 7), ("symbolic_length", "L")])
+    def test_primary_output_uses_unified_batch_and_channels(self, _name, length):
+        self.assertEqual(
+            run_shape_inference(
+                "",
+                "CausalConvWithState",
+                [
+                    ts(FLOAT, ["B", "C", length]),
+                    ts(FLOAT, [3, 1, 4]),
+                    None,
+                    ts(FLOAT, [2, 3, 6]),
+                ],
+                {"dilation": ir.AttrInt64("dilation", 2)},
+                opset_version=29,
+                num_outputs=2,
+            ),
+            [ts(FLOAT, [2, 3, length]), ts(FLOAT, [2, 3, 6])],
+        )
+
     def test_causal_previous_opset_keeps_unit_dilation(self):
         self.assertEqual(
             run_shape_inference(
@@ -607,7 +626,12 @@ class ConvOpset29Test(unittest.TestCase):
                 opset_version=29,
                 num_outputs=2,
             ),
-            [ts(ir.DataType.BFLOAT16, shape), ts(ir.DataType.BFLOAT16, state)],
+            [
+                ts(
+                    ir.DataType.BFLOAT16, [*state[:2], shape[2]] if shape is not None else None
+                ),
+                ts(ir.DataType.BFLOAT16, state),
+            ],
         )
 
     @parameterized.parameterized.expand(
