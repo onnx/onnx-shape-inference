@@ -236,5 +236,19 @@ class GatherNDTest(unittest.TestCase):
         self.assertEqual(actual, [ts(FLOAT, [2, 3])])
 
 
+class GatherOpset29Test(unittest.TestCase):
+    def test_existing_gather_int32(self):
+        self.assertEqual(
+            run_shape_inference(
+                "",
+                "GatherND",
+                [ts(ir.DataType.BFLOAT16, [2, 3, 4]), ts(ir.DataType.INT32, [2, 5, 1])],
+                {"batch_dims": ir.AttrInt64("batch_dims", 1)},
+                opset_version=29,
+            ),
+            [ts(ir.DataType.BFLOAT16, [2, 5, 4])],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -35,3 +35,29 @@ def infer_tensor_scatter(ctx: _context.ShapeInferenceContext, node: ir.Node) -> 
 
     if len(node.outputs) > 0:
         ctx.set_shape_and_dtype(node.outputs[0], past_cache.shape, past_cache.dtype)
+
+
+@_registry.registry.register("", "ScatterND", since_version=29)
+@_registry.registry.register("", "ScatterElements", since_version=29)
+def infer_scatter_29(ctx: _context.ShapeInferenceContext, node: ir.Node) -> None:
+    """Validate the new mean reduction while preserving the data shape and type."""
+    (data, _indices, _updates) = _context.check_inputs(node, "data", "indices", "updates")
+    reduction = node.attributes.get_string("reduction", "none")
+    if reduction not in ("none", "add", "mul", "max", "min", "mean"):
+        ctx.record_error(
+            node,
+            f"Invalid scatter reduction {reduction!r}; use none, add, mul, max, min, mean.",
+        )
+        return
+    if reduction == "mean" and data.dtype in (
+        ir.DataType.BOOL,
+        ir.DataType.STRING,
+        ir.DataType.COMPLEX64,
+        ir.DataType.COMPLEX128,
+    ):
+        ctx.record_error(
+            node,
+            f"Scatter mean does not support {data.dtype}; cast to integer or floating point.",
+        )
+        return
+    infer_scatter(ctx, node)

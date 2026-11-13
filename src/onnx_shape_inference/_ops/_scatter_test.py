@@ -9,7 +9,7 @@ import unittest
 import onnx_ir as ir
 import parameterized
 
-from onnx_shape_inference import OpUsageError
+from onnx_shape_inference import OpUsageError, ShapeInferenceError
 from onnx_shape_inference._ops._testing import (
     run_shape_inference,
     run_shape_inference_with_values,
@@ -91,6 +91,37 @@ class TensorScatterTest(unittest.TestCase):
             opset_version=24,
         )
         self.assertEqual(actual, [ts(FLOAT, ["batch", 5, 3])])
+
+
+class ScatterOpset29Test(unittest.TestCase):
+    @parameterized.parameterized.expand([("ScatterND",), ("ScatterElements",)])
+    def test_scatter_mean(self, op):
+        self.assertEqual(
+            run_shape_inference(
+                "",
+                op,
+                [
+                    ts(ir.DataType.BFLOAT16, ["B", 3]),
+                    ts(ir.DataType.INT32, [2, 2]),
+                    ts(ir.DataType.BFLOAT16, [2]),
+                ],
+                {"reduction": ir.AttrString("reduction", "mean")},
+                opset_version=29,
+            ),
+            [ts(ir.DataType.BFLOAT16, ["B", 3])],
+        )
+        with self.assertRaises(ShapeInferenceError):
+            run_shape_inference(
+                "",
+                op,
+                [
+                    ts(ir.DataType.BOOL, [3]),
+                    ts(ir.DataType.INT64, [1]),
+                    ts(ir.DataType.BOOL, [1]),
+                ],
+                {"reduction": ir.AttrString("reduction", "mean")},
+                opset_version=29,
+            )
 
 
 if __name__ == "__main__":

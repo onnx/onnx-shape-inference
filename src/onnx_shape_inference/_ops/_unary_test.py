@@ -9,7 +9,7 @@ import unittest
 import onnx_ir as ir
 import parameterized
 
-from onnx_shape_inference import OpUsageError
+from onnx_shape_inference import OpUsageError, ShapeInferenceError, registry
 from onnx_shape_inference._ops._testing import (
     run_shape_inference,
     run_shape_inference_with_values,
@@ -138,6 +138,66 @@ class UnaryTest(unittest.TestCase):
                 [None],
                 opset_version=17,
             )
+
+
+class UnaryOpset29Test(unittest.TestCase):
+    @parameterized.parameterized.expand(
+        [
+            ("Expm1",),
+            ("Log1p",),
+            ("LogCumSumExp",),
+        ]
+    )
+    def test_new_shape_preserving_ops(self, op):
+        for shape in (["B", 0, 7], None):
+            self.assertEqual(
+                run_shape_inference(
+                    "", op, [ts(ir.DataType.BFLOAT16, shape)], opset_version=29
+                ),
+                [ts(ir.DataType.BFLOAT16, shape)],
+            )
+        self.assertIsNone(registry.get("", op, 28))
+
+    def test_existing_mvn(self):
+        self.assertEqual(
+            run_shape_inference(
+                "",
+                "MeanVarianceNormalization",
+                [ts(ir.DataType.BFLOAT16, ["B", 3, 7, 7])],
+                {
+                    "axes": ir.AttrInt64s("axes", [-1]),
+                    "epsilon": ir.AttrFloat32("epsilon", 1e-05),
+                },
+                opset_version=29,
+            ),
+            [ts(ir.DataType.BFLOAT16, ["B", 3, 7, 7])],
+        )
+
+    @parameterized.parameterized.expand(
+        [
+            ("LogCumSumExp", [ts(FLOAT, [])], {}),
+            ("LogCumSumExp", [ts(FLOAT, [3])], {"axis": 1}),
+        ]
+    )
+    def test_errors(self, op, inputs, attributes):
+        for policy in ("override", "skip"):
+            expected = (
+                self.assertRaises(ShapeInferenceError)
+                if policy == "override"
+                else self.assertLogs("onnx_shape_inference._context", level="WARNING")
+            )
+            with expected:
+                run_shape_inference(
+                    "",
+                    op,
+                    inputs,
+                    {
+                        attr.name: attr
+                        for attr in ir.convenience.convert_attributes(attributes)
+                    },
+                    opset_version=29,
+                    policy=policy,
+                )
 
 
 if __name__ == "__main__":
