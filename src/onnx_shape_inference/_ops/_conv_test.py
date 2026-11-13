@@ -556,5 +556,80 @@ class CausalConvWithStateTest(unittest.TestCase):
         self.assertEqual(actual[0], ts(FLOAT, [2, 4, 8]))
 
 
+class ConvOpset29Test(unittest.TestCase):
+    def test_causal_previous_opset_keeps_unit_dilation(self):
+        self.assertEqual(
+            run_shape_inference(
+                "",
+                "CausalConvWithState",
+                [ts(ir.DataType.BFLOAT16, [2, 3, 7]), ts(ir.DataType.BFLOAT16, [3, 1, 4])],
+                opset_version=27,
+                num_outputs=2,
+            ),
+            [ts(ir.DataType.BFLOAT16, [2, 3, 7]), ts(ir.DataType.BFLOAT16, [2, 3, 3])],
+        )
+
+    @parameterized.parameterized.expand(
+        [
+            ("dilated", [2, 3, 0], [3, 1, 4], None, 3, [2, 3, 9]),
+            ("kernel_one", [2, 3, 7], [3, 1, 1], None, 4, [2, 3, 0]),
+            ("symbolic", ["B", 3, "L"], [3, 1, "K"], None, 2, ["B", 3, "2*K - 2"]),
+            ("past_refines", None, None, [2, 3, 6], 2, [2, 3, 6]),
+        ]
+    )
+    def test_causal(self, _name, shape, weight, past, dilation, state):
+        self.assertEqual(
+            run_shape_inference(
+                "",
+                "CausalConvWithState",
+                [
+                    ts(ir.DataType.BFLOAT16, shape),
+                    ts(ir.DataType.BFLOAT16, weight),
+                    None,
+                    ts(ir.DataType.BFLOAT16, past) if past else None,
+                ],
+                {"dilation": ir.AttrInt64("dilation", dilation)},
+                opset_version=29,
+                num_outputs=2,
+            ),
+            [ts(ir.DataType.BFLOAT16, shape), ts(ir.DataType.BFLOAT16, state)],
+        )
+
+    @parameterized.parameterized.expand(
+        [
+            (
+                "CausalConvWithState",
+                [ts(FLOAT, [2, 3, 7]), ts(FLOAT, [3, 1, 4])],
+                {"dilation": 0},
+            ),
+            ("CausalConvWithState", [ts(FLOAT, [2, 3, 7]), ts(FLOAT, [3, 2, 4])], {}),
+            (
+                "CausalConvWithState",
+                [ts(FLOAT, [2, 3, 7]), ts(FLOAT, [3, 1, 4]), None, ts(FLOAT, [2, 3, 3])],
+                {"dilation": 2},
+            ),
+        ]
+    )
+    def test_errors(self, op, inputs, attributes):
+        for policy in ("override", "skip"):
+            expected = (
+                self.assertRaises(ShapeInferenceError)
+                if policy == "override"
+                else self.assertLogs("onnx_shape_inference._context", level="WARNING")
+            )
+            with expected:
+                run_shape_inference(
+                    "",
+                    op,
+                    inputs,
+                    {
+                        attr.name: attr
+                        for attr in ir.convenience.convert_attributes(attributes)
+                    },
+                    opset_version=29,
+                    policy=policy,
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
