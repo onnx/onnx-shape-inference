@@ -333,5 +333,5 @@ def infer_causal_conv_with_state_29(
         ]
     )
     ctx.set_shape_and_dtype(node.outputs[0], data.shape, data.dtype)
-    if len(node.outputs) > 1:
+    if len(node.outputs) > 1 and node.outputs[1].name != "":
         ctx.set_shape_and_dtype(node.outputs[1], state_shape, data.dtype)

@@ -9,7 +9,7 @@ import unittest
 import onnx_ir as ir
 import parameterized
 
-from onnx_shape_inference import OpUsageError, ShapeInferenceError
+from onnx_shape_inference import OpUsageError, ShapeInferenceError, _context, _registry
 from onnx_shape_inference._ops._testing import (
     run_shape_inference,
     run_shape_inference_with_values,
@@ -36,6 +36,21 @@ def _attrs(**kwargs) -> dict[str, ir.Attr]:
 
 
 class ConvTest(unittest.TestCase):
+    def test_causal_conv_omitted_state_output_remains_untyped(self):
+        data = ir.Value(type=ir.TensorType(FLOAT), shape=ir.Shape([2, 3, 7]))
+        weight = ir.Value(type=ir.TensorType(FLOAT), shape=ir.Shape([3, 1, 4]))
+        output = ir.Value(name="output")
+        omitted_state = ir.Value(name="")
+        node = ir.Node(
+            "", "CausalConvWithState", [data, weight], outputs=[output, omitted_state]
+        )
+        _registry.registry.get("", "CausalConvWithState", 29)(
+            _context.ShapeInferenceContext({"": 29}), node
+        )
+        self.assertEqual(ir.TypeAndShape(output.type, output.shape), ts(FLOAT, [2, 3, 7]))
+        self.assertIsNone(omitted_state.type)
+        self.assertIsNone(omitted_state.shape)
+
     @parameterized.parameterized.expand(
         [
             ("short_strides", _attrs(strides=[1])),

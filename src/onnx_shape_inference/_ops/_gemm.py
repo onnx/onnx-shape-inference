@@ -94,7 +94,6 @@ def infer_gemm_29(ctx: _context.ShapeInferenceContext, node: ir.Node) -> None:
             ctx.record_error(
                 node, f"Gemm contraction dimensions {dims[-1]} and {k} differ; align A and B."
             )
-            return
     result = [*dims[:-1], n]
     if len(node.inputs) > 2 and (c := node.inputs[2]) is not None and c.shape is not None:
         if c.shape.rank() > len(result) or any(

@@ -145,12 +145,13 @@ class GemmTest(unittest.TestCase):
                 opset_version=17,
             )
 
-    def test_contraction_dimension_mismatch_preserves_best_effort_shape(self):
+    @parameterized.parameterized.expand([(17,), (29,)])
+    def test_contraction_dimension_mismatch_preserves_best_effort_shape(self, opset):
         actual = run_shape_inference(
             "",
             "Gemm",
             [ts(FLOAT, [2, 3]), ts(FLOAT, [5, 4])],
-            opset_version=17,
+            opset_version=opset,
             policy="skip",
         )
 
