@@ -253,3 +253,85 @@ def infer_causal_conv_with_state(ctx: _context.ShapeInferenceContext, node: ir.N
                 state_len = ctx.new_symbolic_dim()
             present_shape = ir.Shape([inp.shape[0], inp.shape[1], state_len])
         ctx.set_shape_and_dtype(node.outputs[1], present_shape, output_dtype)
+
+
+@_registry.registry.register("", "CausalConvWithState", since_version=29)
+def infer_causal_conv_with_state_29(
+    ctx: _context.ShapeInferenceContext, node: ir.Node
+) -> None:
+    """Infer dilated history length, refining shared dimensions from optional inputs."""
+    (data, weight) = _context.check_inputs(node, "input", "weight")
+    dilation = node.attributes.get_int("dilation", 1)
+    activation = node.attributes.get_string("activation", "none")
+    if dilation < 1 or activation not in ("none", "silu", "swish"):
+        ctx.record_error(
+            node,
+            f"Invalid dilation {dilation} or activation {activation!r}; "
+            "use dilation >= 1 and none, silu, or swish.",
+        )
+        return
+    dimensions: dict[str, int | ir.SymbolicDim] = {"one": 1}
+    inputs = [(data, ("B", "C", "L")), (weight, ("C", "one", "K"))]
+    for index, labels in ((2, ("C",)), (3, ("B", "C", "H"))):
+        if len(node.inputs) > index and node.inputs[index] is not None:
+            inputs.append((node.inputs[index], labels))
+    for value, labels in inputs:
+        if value.shape is None:
+            continue
+        if value.shape.rank() != len(labels):
+            ctx.record_error(
+                node,
+                f"CausalConvWithState {value.name} shape {value.shape} must have axes {labels}.",
+            )
+            return
+        for label, dim in zip(labels, value.shape):
+            previous = dimensions.get(label)
+            if isinstance(previous, int) and isinstance(dim, int) and previous != dim:
+                ctx.record_error(
+                    node,
+                    f"CausalConvWithState {label} sizes {previous} and {dim} differ; align inputs.",
+                )
+                return
+            if previous is None or isinstance(dim, int):
+                dimensions[label] = dim
+    kernel = dimensions.get("K")
+    history = dimensions.get("H")
+    if isinstance(kernel, int):
+        if kernel < 1 or (kernel - 1) * dilation >= 2**63 - 1:
+            ctx.record_error(
+                node,
+                f"Kernel {kernel} and dilation {dilation} require invalid history; "
+                "use kernel >= 1 and effective kernel <= INT64_MAX.",
+            )
+            return
+        expected: int | ir.SymbolicDim = (kernel - 1) * dilation
+        if isinstance(history, int) and history != expected:
+            ctx.record_error(
+                node,
+                f"Past history {history} must equal (kernel-1)*dilation = {expected}; resize past_state.",
+            )
+            return
+        history = expected
+    elif isinstance(history, int):
+        if history < 0 or history >= 2**63 - 1 or history % dilation:
+            ctx.record_error(
+                node,
+                f"Past history {history} must be a nonnegative multiple of dilation {dilation}, below INT64_MAX.",
+            )
+            return
+    elif history is None and kernel is not None:
+        history = (kernel - 1) * dilation
+    if history is None:
+        history = ctx.new_symbolic_dim()
+    batch = dimensions.get("B")
+    channels = dimensions.get("C")
+    state_shape = ir.Shape(
+        [
+            batch if batch is not None else ctx.new_symbolic_dim(),
+            channels if channels is not None else ctx.new_symbolic_dim(),
+            history,
+        ]
+    )
+    ctx.set_shape_and_dtype(node.outputs[0], data.shape, data.dtype)
+    if len(node.outputs) > 1:
+        ctx.set_shape_and_dtype(node.outputs[1], state_shape, data.dtype)

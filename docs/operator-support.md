@@ -1,5 +1,37 @@
 # Released operator support
 
+## Upstream opset 29 (2026-11-12)
+
+All **13 standard-domain schemas with `since_version=29`** were audited against
+ONNX main at
+[`3c41120`](https://github.com/onnx/onnx/tree/3c41120b9c69657a1dd13407b080bd451ed06c9c).
+The authoritative inventory is
+[`OpSet_Onnx_ver29`](https://github.com/onnx/onnx/blob/3c41120b9c69657a1dd13407b080bd451ed06c9c/onnx/defs/operator_sets.h#L1522-L1551),
+not the installed ONNX wheel, which may omit recent additions.
+
+| Schema | Change from previous schema and inference coverage |
+|--------|----------------------------------------------------|
+| `Expm1`, `Log1p` | New unary float operators; preserve shape and dtype (FLOAT16/BFLOAT16/FLOAT/DOUBLE), including unknown rank |
+| `LogCumSumExp` | New inclusive cumulative log-sum-exp; preserve floating dtype/shape, validate rank >= 1 and the `axis` attribute (default 0); no axis input |
+| `GroupedMatMul` | New `[M,K]` by `[G,K,N]` operation selected by INT32/INT64 `[M,S]` indices; output `[M,S,N]`; support `transB` and optional `[G,N]` bias, validating/refining shared dimensions |
+| `DequantizePacked` | New UINT8 byte-vector decoder; infer literal `shape` and `output_dtype` (default FLOAT); validate all 27 fixed GGUF formats, block alignment, exact byte length, empty tensors, and INT64 size limits |
+| `Pack` | New UINT8 code packing; `bits` or `radix`/`group_size`, arbitrary `axis`, UINT8/UINT32 storage selected by `output_type`; output axis is `ceil(ceil(N/group_size)*group_width/word_bits)` |
+| `Unpack` | New UINT8/UINT32 storage unpacking to UINT8 codes; scalar INT64 `count` sets the output axis, including symbolic data; validate exact packed length when known |
+| `Gemm` | Revised from v13: A now has rank >= 1, `transA` swaps its last two axes (no-op on vectors), B remains rank 2; output `[...,N]`; optional C must broadcast unidirectionally; dtype set is unchanged |
+| `CausalConvWithState` | Revised from v27: new `dilation` (default 1); history becomes `(K-1)*dilation`; validate/refine input, kernel, optional bias/past state, activation, and effective-kernel limits; output type set and channels-first layout are unchanged |
+| `ScatterND` | Revised from v18: INT32 indices and `mean` reduction; existing data-shaped/type-preserving geometry remains correct; new handler validates reduction and rejects BOOL/STRING/complex mean |
+| `ScatterElements` | Revised from v18: `mean` reduction with the same validation; INT32 indices were already allowed; output dtype/shape remain data's |
+| `GatherND` | Revised from v13: INT32 indices alongside INT64; existing handler already handles both and `batch_dims`, without a geometry/type change |
+| `MeanVarianceNormalization` | Revised from v13: `epsilon` and clarified negative/empty axes; existing unary handler already preserves the unchanged output shape and floating dtype |
+
+New handlers are registered only from opset 29; changed Gemm, causal convolution,
+and scatter inference dispatch separately from older versions. No numerical
+evaluation is performed by these handlers. New type support is propagated without
+depending on an installed schema registry. Pack/Unpack additionally retain symbolic
+axis arithmetic and known symbolic counts. The opset-29 LogSoftmax function-body
+builder update does not introduce a `since_version=29` schema or change its
+shape/type rule.
+
 ## Release audit (2026-10-19)
 
 The audit uses the latest **released**, non-prerelease versions advertised by both

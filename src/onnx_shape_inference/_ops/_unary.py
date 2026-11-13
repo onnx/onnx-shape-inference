@@ -42,11 +42,13 @@ _reg = _registry.registry.register
 @_reg("", "Elu", since_version=1)
 @_reg("", "Erf", since_version=9)
 @_reg("", "Exp", since_version=1)
+@_reg("", "Expm1", since_version=29)
 @_reg("", "Gelu", since_version=20)
 @_reg("", "HardSigmoid", since_version=1)
 @_reg("", "HardSwish", since_version=14)
 @_reg("", "LeakyRelu", since_version=1)
 @_reg("", "Log", since_version=1)
+@_reg("", "Log1p", since_version=29)
 @_reg("", "Reciprocal", since_version=1)
 @_reg("", "Relu", since_version=1)
 @_reg("", "Round", since_version=11)
@@ -142,6 +144,23 @@ def infer_cumsum(ctx: _context.ShapeInferenceContext, node: ir.Node) -> None:
 
     if len(node.outputs) > 0:
         ctx.set_shape_and_dtype(node.outputs[0], input_val.shape, input_val.dtype)
+
+
+@_reg("", "LogCumSumExp", since_version=29)
+def infer_log_cumsum_exp(ctx: _context.ShapeInferenceContext, node: ir.Node) -> None:
+    """Infer cumulative log-sum-exp, whose axis is an attribute, not an input."""
+    (data,) = _context.check_inputs(node, "X")
+    if data.shape is not None:
+        rank = data.shape.rank()
+        axis = node.attributes.get_int("axis", 0)
+        if rank == 0 or not -rank <= axis < rank:
+            ctx.record_error(
+                node,
+                f"LogCumSumExp axis {axis} is invalid for rank {rank}; "
+                "use rank >= 1 and an axis in [-rank, rank-1].",
+            )
+            return
+    ctx.set_shape_and_dtype(node.outputs[0], data.shape, data.dtype)
 
 
 @_reg("", "RegexFullMatch", since_version=20)
