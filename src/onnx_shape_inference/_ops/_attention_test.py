@@ -7,8 +7,10 @@ from __future__ import annotations
 import unittest
 
 import onnx_ir as ir
+import parameterized
 
-from onnx_shape_inference import OpUsageError
+from onnx_shape_inference import OpUsageError, ShapeInferenceError, _context
+from onnx_shape_inference._ops import _attention
 from onnx_shape_inference._ops._testing import (
     run_shape_inference,
     run_shape_inference_with_values,
@@ -300,6 +302,224 @@ class LinearAttentionTest(unittest.TestCase):
         self.assertEqual(present[1], 4)
         self.assertIsInstance(present[2], ir.SymbolicDim)
         self.assertIsInstance(present[3], ir.SymbolicDim)
+
+
+class LinearAttention29Test(unittest.TestCase):
+    @parameterized.parameterized.expand([("", "states"), ("present", ""), ("", "")])
+    def test_empty_output_slots(self, present_name, states_name):
+        inputs = [
+            ir.Value(name=name, type=ir.TensorType(FLOAT), shape=ir.Shape([2, 4, 32]))
+            for name in ("q", "k", "v")
+        ]
+        outputs = [ir.Value(name=name) for name in ("output", present_name, states_name)]
+        node = ir.Node(
+            "",
+            "LinearAttention",
+            inputs,
+            outputs=outputs,
+            attributes={
+                **_attrs(q_num_heads=4, kv_num_heads=4),
+                "update_rule": ir.AttrString("update_rule", "linear"),
+            },
+        )
+        _attention.infer_linear_attention_29(_context.ShapeInferenceContext({"": 29}), node)
+        expected = [ts(FLOAT, [2, 4, 32]), ts(FLOAT, [2, 4, 8, 8]), ts(FLOAT, [2, 4, 4, 8, 8])]
+        for value, spec in zip(outputs, expected):
+            self.assertEqual(
+                ir.TypeAndShape(value.type, value.shape), spec if value.name else ts()
+            )
+
+    @parameterized.parameterized.expand(
+        [
+            ("expanded", 4, 4, 12, 4, 24, 12, 24),
+            ("equal_explicit", 4, 4, 4, 4, 24, 4, 24),
+            ("default_gqa", 8, 4, None, 4, 24, 4, 48),
+            ("zero_gqa", 8, 4, 0, 4, 24, 4, 48),
+            ("empty_chunk", 4, 4, 12, 0, 24, 12, 24),
+        ]
+    )
+    def test_head_layouts(self, _name, qh, kh, vh, time, width, sh, out):
+        attrs = _attrs(q_num_heads=qh, kv_num_heads=kh)
+        if vh is not None:
+            attrs.update(_attrs(v_num_heads=vh))
+        attrs["update_rule"] = ir.AttrString("update_rule", "linear")
+        actual = run_shape_inference(
+            "",
+            "LinearAttention",
+            [
+                ts(FLOAT, [2, time, qh * 8]),
+                ts(FLOAT, [2, time, kh * 8]),
+                ts(FLOAT, [2, time, width]),
+            ],
+            attributes=attrs,
+            opset_version=29,
+            num_outputs=3,
+        )
+        self.assertEqual(
+            actual,
+            [
+                ts(FLOAT, [2, time, out]),
+                ts(FLOAT, [2, sh, 8, width // sh]),
+                ts(FLOAT, [2, time, sh, 8, width // sh]),
+            ],
+        )
+
+    @parameterized.parameterized.expand(
+        [
+            ("linear", None, None),
+            ("gated", 12, None),
+            ("gated_per_key", 96, None),
+            ("delta", None, 12),
+            ("gated_delta", 12, 1),
+        ]
+    )
+    def test_rules_and_mixed_state_dtype(self, name, decay, beta):
+        rule = "gated" if name == "gated_per_key" else name
+        actual = run_shape_inference(
+            "",
+            "LinearAttention",
+            [
+                ts(ir.DataType.FLOAT16, [2, 4, 32]),
+                ts(ir.DataType.FLOAT16, [2, 4, 32]),
+                ts(ir.DataType.FLOAT16, [2, 4, 24]),
+                ts(FLOAT, [2, 12, 8, 2]),
+                ts(ir.DataType.FLOAT16, [2, 4, decay]) if decay else None,
+                ts(ir.DataType.FLOAT16, [2, 4, beta]) if beta else None,
+            ],
+            attributes={
+                **_attrs(q_num_heads=4, kv_num_heads=4, v_num_heads=12),
+                "update_rule": ir.AttrString("update_rule", rule),
+            },
+            opset_version=29,
+            num_outputs=3,
+        )
+        self.assertEqual(
+            actual,
+            [
+                ts(ir.DataType.FLOAT16, [2, 4, 24]),
+                ts(FLOAT, [2, 12, 8, 2]),
+                ts(FLOAT, [2, 4, 12, 8, 2]),
+            ],
+        )
+
+    def test_symbolic_shapes(self):
+        actual = run_shape_inference(
+            "",
+            "LinearAttention",
+            [
+                ts(FLOAT, ["B", "T", "K"]),
+                ts(FLOAT, ["B", "T", "K"]),
+                ts(FLOAT, ["B", "T", "V"]),
+            ],
+            attributes={
+                **_attrs(q_num_heads=4, kv_num_heads=4, v_num_heads=12),
+                "update_rule": ir.AttrString("update_rule", "linear"),
+            },
+            opset_version=29,
+            num_outputs=3,
+        )
+        self.assertEqual(
+            actual,
+            [
+                ts(FLOAT, ["B", "T", "12*floor(V/12)"]),
+                ts(FLOAT, ["B", 12, "floor(K/4)", "floor(V/12)"]),
+                ts(FLOAT, ["B", "T", 12, "floor(K/4)", "floor(V/12)"]),
+            ],
+        )
+
+    def test_unknown_inputs_inferred_from_state_and_gate(self):
+        actual = run_shape_inference(
+            "",
+            "LinearAttention",
+            [
+                ts(FLOAT),
+                ts(FLOAT),
+                ts(FLOAT),
+                ts(None, [2, 12, 8, 2]),
+                ts(FLOAT, [2, "T", 12]),
+            ],
+            attributes={
+                **_attrs(q_num_heads=4, kv_num_heads=4, v_num_heads=12),
+                "update_rule": ir.AttrString("update_rule", "gated"),
+            },
+            opset_version=29,
+            num_outputs=3,
+        )
+        self.assertEqual(
+            actual,
+            [
+                ts(FLOAT, [2, "T", 24]),
+                ts(None, [2, 12, 8, 2]),
+                ts(None, [2, "T", 12, 8, 2]),
+            ],
+        )
+
+    @parameterized.parameterized.expand(
+        [
+            ("negative_heads", {"v_num_heads": -1}, None),
+            ("nonmultiple", {"v_num_heads": 6}, None),
+            ("expanded_gqa", {"q_num_heads": 8}, None),
+            ("zero_heads", {"kv_num_heads": 0}, None),
+            ("zero_key", {}, (1, [2, 4, 0])),
+            ("zero_value", {}, (2, [2, 4, 0])),
+            ("indivisible_value", {}, (2, [2, 4, 25])),
+            ("key_width_mismatch", {}, (1, [2, 4, 16])),
+            ("batch_mismatch", {}, (2, [3, 4, 24])),
+            ("wrong_rank", {}, (1, [2, 4])),
+            ("wrong_state_heads", {}, (3, [2, 4, 8, 2])),
+            ("wrong_decay", {}, (4, [2, 4, 4])),
+            ("zero_decay", {}, (4, [2, 4, 0])),
+            ("wrong_beta", {}, (5, [2, 4, 4])),
+        ]
+    )
+    def test_invalid_layout(self, _name, attrs, replacement):
+        inputs = [
+            ts(FLOAT, [2, 4, 32]),
+            ts(FLOAT, [2, 4, 32]),
+            ts(FLOAT, [2, 4, 24]),
+            None,
+            ts(FLOAT, [2, 4, 12]),
+            ts(FLOAT, [2, 4, 12]),
+        ]
+        if replacement is not None:
+            index, shape = replacement
+            inputs[index] = ts(FLOAT, shape)
+        with self.assertRaises(ShapeInferenceError):
+            run_shape_inference(
+                "",
+                "LinearAttention",
+                inputs,
+                attributes=_attrs(q_num_heads=4, kv_num_heads=4, v_num_heads=12)
+                | _attrs(**attrs),
+                opset_version=29,
+                num_outputs=3,
+            )
+
+    @parameterized.parameterized.expand([("missing_gate", "gated_delta"), ("bad_rule", "bad")])
+    def test_invalid_rule_inputs(self, _name, rule):
+        with self.assertRaises(ShapeInferenceError):
+            run_shape_inference(
+                "",
+                "LinearAttention",
+                [ts(FLOAT)] * 3,
+                attributes={
+                    **_attrs(q_num_heads=4, kv_num_heads=4),
+                    "update_rule": ir.AttrString("update_rule", rule),
+                },
+                opset_version=29,
+            )
+
+    @parameterized.parameterized.expand([(27,), (28,)])
+    def test_legacy_zero_width(self, version):
+        actual = run_shape_inference(
+            "",
+            "LinearAttention",
+            [ts(FLOAT, [2, 4, 0])] * 3,
+            attributes=_attrs(q_num_heads=4, kv_num_heads=4),
+            opset_version=version,
+            num_outputs=2,
+        )
+        self.assertEqual(actual, [ts(FLOAT, [2, 4, 0]), ts(FLOAT, [2, 4, 0, 0])])
 
 
 class FlexAttentionTest(unittest.TestCase):
