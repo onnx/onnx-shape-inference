@@ -1,5 +1,25 @@
 # Released operator support
 
+## LinearAttention opset 29 (2026-11-16)
+
+The follow-up [onnx/onnx#8693](https://github.com/onnx/onnx/pull/8693)
+adds a fourteenth opset-29 schema after the inventory below. Inference follows
+the [upstream schema and shared inference helper](https://github.com/onnx/onnx/blob/cb7fbbff6b743c379d715386ee1a8c09c48bf99a/onnx/defs/nn/utils.cc):
+
+- Positive `v_num_heads` expands compact Q/K heads adjacently; value, state and
+  gates use that head count, and output width is `v_num_heads * d_v`.
+  Zero/omitted `v_num_heads` retains query GQA/MQA.
+- Optional `states` is `[B,T,H_state,d_k,d_v]`, including empty chunks.
+  Both state outputs inherit `past_state`'s dtype, even when unknown; only an
+  omitted state defaults to the query dtype.
+- Shared dimensions are refined from inputs, state and gates. Head counts,
+  positive head widths, packed divisibility, gate widths and update-rule inputs
+  are validated. Symbolic head-width arithmetic is retained.
+
+Opsets 27/28 keep their existing handler, including historical zero-width support.
+Scale, normalization guidance and the `chunk_size` implementation hint do not
+change output shape or dtype. No installed ONNX schema is required.
+
 ## Upstream opset 29 (2026-11-12)
 
 All **13 standard-domain schemas with `since_version=29`** were audited against

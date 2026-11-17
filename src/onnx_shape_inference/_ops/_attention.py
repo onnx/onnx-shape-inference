@@ -8,6 +8,7 @@ __all__ = [
     "infer_attention",
     "infer_flex_attention",
     "infer_linear_attention",
+    "infer_linear_attention_29",
     "infer_rotary_embedding",
 ]
 
@@ -234,6 +235,152 @@ def infer_linear_attention(ctx: _context.ShapeInferenceContext, node: ir.Node) -
             d_v = _head_size(ctx, v_hidden, kv_num_heads)
             present_shape = ir.Shape([q.shape[0], kv_num_heads, d_k, d_v])
         ctx.set_shape_and_dtype(node.outputs[1], present_shape, present_dtype)
+
+
+@_reg("", "LinearAttention", since_version=29)
+def infer_linear_attention_29(ctx: _context.ShapeInferenceContext, node: ir.Node) -> None:
+    """Infer compact Q/K, expanded value heads and optional state trajectories.
+
+    Spec: https://onnx.ai/onnx/operators/onnx__LinearAttention.html
+
+    Zero/omitted v_num_heads retains query GQA. A positive value expands Q/K
+    adjacently and makes both output and state use that many heads.
+    """
+    q, k, v = _context.check_inputs(node, "query", "key", "value")
+    q_heads = _context.require_attr(node, "q_num_heads").as_int()
+    k_heads = _context.require_attr(node, "kv_num_heads").as_int()
+    v_heads = _attr_int(node, "v_num_heads") or 0
+    if q_heads <= 0 or k_heads <= 0 or q_heads % k_heads:
+        ctx.record_error(
+            node,
+            f"q_num_heads ({q_heads}) must be a positive multiple of "
+            f"kv_num_heads ({k_heads}); set both head counts to positive compatible values.",
+        )
+        return
+    if v_heads < 0 or (v_heads > 0 and (q_heads != k_heads or v_heads % k_heads)):
+        ctx.record_error(
+            node,
+            f"v_num_heads ({v_heads}) must be zero, or a positive multiple of "
+            f"kv_num_heads ({k_heads}) with q_num_heads ({q_heads}) == kv_num_heads.",
+        )
+        return
+    state_heads = v_heads or k_heads
+    output_heads = v_heads or q_heads
+    past = node.inputs[3] if len(node.inputs) > 3 else None
+    decay = node.inputs[4] if len(node.inputs) > 4 else None
+    beta = node.inputs[5] if len(node.inputs) > 5 else None
+    rule_attr = node.attributes.get("update_rule")
+    rule = rule_attr.as_string() if rule_attr is not None else "gated_delta"
+    if rule not in ("linear", "gated", "delta", "gated_delta"):
+        ctx.record_error(
+            node, f"Unknown update_rule {rule!r}; use linear, gated, delta, or gated_delta."
+        )
+        return
+    if (decay is not None) != (rule in ("gated", "gated_delta")) or (beta is not None) != (
+        rule in ("delta", "gated_delta")
+    ):
+        ctx.record_error(
+            node,
+            f"update_rule={rule!r} has incompatible decay/beta inputs; supply decay "
+            "only for gated/gated_delta and beta only for delta/gated_delta.",
+        )
+        return
+
+    dims: dict[str, int | ir.SymbolicDim] = {"heads": state_heads}
+
+    def unify(name: str, dim: int | ir.SymbolicDim) -> bool:
+        existing = dims.get(name)
+        if isinstance(existing, int) and isinstance(dim, int) and existing != dim:
+            ctx.record_error(
+                node,
+                f"Inconsistent {name} dimensions: {existing} and {dim}; "
+                "align query/key/value, state, and gate shapes.",
+            )
+            return False
+        if existing is None or isinstance(dim, int):
+            dims[name] = dim
+        return True
+
+    for value, names in (
+        (q, ("B", "T", "Q")),
+        (k, ("B", "T", "K")),
+        (v, ("B", "T", "V")),
+        (past, ("B", "heads", "Dk", "Dv")),
+        (decay, ("B", "T", "decay")),
+        (beta, ("B", "T", "beta")),
+    ):
+        if value is None or value.shape is None:
+            continue
+        if value.shape.rank() != len(names):
+            ctx.record_error(
+                node,
+                f"Input {value.name!r} has rank {value.shape.rank()}; "
+                f"LinearAttention requires rank {len(names)} for dimensions {names}.",
+            )
+            return
+        for name, dim in zip(names, value.shape, strict=True):
+            if not unify(name, dim):
+                return
+
+    for packed, heads, name in (
+        ("Q", q_heads, "Dk"),
+        ("K", k_heads, "Dk"),
+        ("V", state_heads, "Dv"),
+    ):
+        hidden = dims.get(packed)
+        if hidden is None:
+            continue
+        if isinstance(hidden, int) and (hidden <= 0 or hidden % heads):
+            ctx.record_error(
+                node,
+                f"Packed {packed} width ({hidden}) must be positive and divisible "
+                f"by its head count ({heads}); use positive integral head widths.",
+            )
+            return
+        if not unify(name, _utils.floor_div_dim(hidden, heads)):
+            return
+    for name in ("Dk", "Dv"):
+        dim = dims.get(name)
+        if isinstance(dim, int) and dim <= 0:
+            ctx.record_error(node, f"{name} must be positive, got {dim}; fix the state shape.")
+            return
+    dk = dims.get("Dk")
+    decay_width = dims.get("decay")
+    if isinstance(decay_width, int) and (
+        decay_width <= 0
+        or (
+            decay_width not in (state_heads, state_heads * dk)
+            if isinstance(dk, int)
+            else decay_width % state_heads != 0
+        )
+    ):
+        ctx.record_error(
+            node,
+            f"decay width ({decay_width}) must be {state_heads} or "
+            f"{state_heads} * Dk; match the value/state head layout.",
+        )
+        return
+    beta_width = dims.get("beta")
+    if isinstance(beta_width, int) and beta_width not in (1, state_heads):
+        ctx.record_error(
+            node,
+            f"beta width ({beta_width}) must be 1 or {state_heads}; "
+            "match the value/state head layout.",
+        )
+        return
+    for name in ("B", "T", "Dk", "Dv"):
+        if name not in dims:
+            dims[name] = ctx.new_symbolic_dim()
+    batch, time, dk, dv = (dims[name] for name in ("B", "T", "Dk", "Dv"))
+    state_dtype = past.dtype if past is not None else q.dtype
+    shapes = (
+        ([batch, time, output_heads * dv], q.dtype),
+        ([batch, state_heads, dk, dv], state_dtype),
+        ([batch, time, state_heads, dk, dv], state_dtype),
+    )
+    for output, (shape, dtype) in zip(node.outputs, shapes):
+        if output.name != "":
+            ctx.set_shape_and_dtype(output, ir.Shape(shape), dtype)
 
 
 @_reg("ai.onnx.preview", "FlexAttention", since_version=1)
