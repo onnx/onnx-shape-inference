@@ -6,7 +6,11 @@ from __future__ import annotations
 
 import unittest
 
+import numpy as np
+import onnx
 import onnx_ir as ir
+import parameterized
+from onnx.reference import ReferenceEvaluator
 
 from onnx_shape_inference import OpUsageError, ShapeInferenceError, infer_symbolic_shapes
 from onnx_shape_inference._ops._testing import (
@@ -165,6 +169,167 @@ class UniqueTest(unittest.TestCase):
                 ts(INT64, [2]),
             ],
         )
+
+    @parameterized.parameterized.expand(
+        [
+            ("first", 0, ["_d0", 3, "width"], "batch"),
+            ("middle", 1, ["batch", "_d0", "width"], 3),
+            ("last", 2, ["batch", 3, "_d0"], "width"),
+            ("negative_first", -3, ["_d0", 3, "width"], "batch"),
+            ("negative_last", -1, ["batch", 3, "_d0"], "width"),
+        ]
+    )
+    def test_nonconstant_axis(self, _name, axis, output_shape, inverse_length):
+        actual = run_shape_inference(
+            "",
+            "Unique",
+            [ts(FLOAT, ["batch", 3, "width"])],
+            {"axis": ir.AttrInt64("axis", axis)},
+            opset_version=17,
+            num_outputs=4,
+        )
+        self.assertEqual(
+            actual,
+            [
+                ts(FLOAT, output_shape),
+                ts(INT64, ["_d0"]),
+                ts(INT64, [inverse_length]),
+                ts(INT64, ["_d0"]),
+            ],
+        )
+
+    def test_axis_with_unknown_input_rank(self):
+        actual = run_shape_inference(
+            "",
+            "Unique",
+            [ts(FLOAT)],
+            {"axis": ir.AttrInt64("axis", -1)},
+            opset_version=17,
+            num_outputs=4,
+        )
+        self.assertEqual(
+            actual,
+            [
+                ts(FLOAT),
+                ts(INT64, ["_d0"]),
+                ts(INT64, ["_d1"]),
+                ts(INT64, ["_d0"]),
+            ],
+        )
+
+    def test_unknown_input_rank_without_axis_is_flattened(self):
+        actual = run_shape_inference(
+            "",
+            "Unique",
+            [ts(FLOAT)],
+            opset_version=17,
+            num_outputs=4,
+        )
+        self.assertEqual(
+            actual,
+            [
+                ts(FLOAT, ["_d0"]),
+                ts(INT64, ["_d0"]),
+                ts(INT64, ["_d1"]),
+                ts(INT64, ["_d0"]),
+            ],
+        )
+
+    def test_constant_negative_axis(self):
+        actual = run_shape_inference_with_values(
+            "",
+            "Unique",
+            [const_value([[1, 1], [2, 2], [3, 3]])],
+            {"axis": ir.AttrInt64("axis", -1)},
+            opset_version=17,
+            num_outputs=4,
+        )
+        self.assertEqual(
+            actual,
+            [
+                ts(INT64, [3, 1]),
+                ts(INT64, [1]),
+                ts(INT64, [2]),
+                ts(INT64, [1]),
+            ],
+        )
+
+    @parameterized.parameterized.expand([(2,), (-3,)])
+    def test_axis_out_of_range(self, axis):
+        with self.assertRaisesRegex(ShapeInferenceError, "axis=.*out of range"):
+            run_shape_inference(
+                "",
+                "Unique",
+                [ts(FLOAT, [3, 2])],
+                {"axis": ir.AttrInt64("axis", axis)},
+                opset_version=17,
+                num_outputs=4,
+            )
+
+    def test_invalid_constant_axis_records_semantic_error(self):
+        with self.assertRaisesRegex(ShapeInferenceError, "axis=.*out of range"):
+            run_shape_inference_with_values(
+                "",
+                "Unique",
+                [const_value([[1, 2]])],
+                {"axis": ir.AttrInt64("axis", 2)},
+                opset_version=17,
+                num_outputs=4,
+            )
+
+    def test_invalid_axis_skip_policy_preserves_output_dtypes(self):
+        actual = run_shape_inference(
+            "",
+            "Unique",
+            [ts(FLOAT, [3, 2])],
+            {"axis": ir.AttrInt64("axis", 2)},
+            opset_version=17,
+            num_outputs=4,
+            policy="skip",
+        )
+        self.assertEqual(actual, [ts(FLOAT), ts(INT64), ts(INT64), ts(INT64)])
+
+    def test_scalar_input_axis_is_invalid(self):
+        with self.assertRaisesRegex(ShapeInferenceError, "axis=.*out of range"):
+            run_shape_inference(
+                "",
+                "Unique",
+                [ts(FLOAT, [])],
+                {"axis": ir.AttrInt64("axis", 0)},
+                opset_version=17,
+            )
+
+    def test_axis_rank_flows_through_shape_and_passes_onnx_validation(self):
+        x = ir.Value(name="x", type=ir.TensorType(FLOAT), shape=ir.Shape([3, 2]))
+        unique = ir.Node(
+            "",
+            "Unique",
+            [x],
+            attributes=[ir.AttrInt64("axis", 0)],
+            num_outputs=4,
+        )
+        shape = ir.Node("", "Shape", [unique.outputs[0]], num_outputs=1)
+        model = ir.Model(
+            ir.Graph(
+                [x],
+                [*unique.outputs, shape.outputs[0]],
+                nodes=[unique, shape],
+                name="unique_axis",
+                opset_imports={"": 17},
+            ),
+            ir_version=10,
+        )
+        infer_symbolic_shapes(model)
+        self.assertEqual(unique.outputs[0].shape.rank(), 2)
+        self.assertEqual(unique.outputs[0].shape[1], 2)
+        self.assertEqual(unique.outputs[2].shape, ir.Shape([3]))
+        self.assertEqual(shape.outputs[0].shape, ir.Shape([2]))
+        proto = ir.to_proto(model)
+        onnx.checker.check_model(proto, full_check=True)
+        data = np.array([[1, 2], [1, 2], [3, 4]], dtype=np.float32)
+        outputs = ReferenceEvaluator(proto).run(None, {"x": data})
+        np.testing.assert_array_equal(outputs[0], np.unique(data, axis=0))
+        np.testing.assert_array_equal(outputs[-1], [2, 2])
 
     def test_none_input_raises(self):
         with self.assertRaises(OpUsageError):

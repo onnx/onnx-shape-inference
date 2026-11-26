@@ -79,21 +79,32 @@ def infer_compress(ctx: _context.ShapeInferenceContext, node: ir.Node) -> None:
 def infer_unique(ctx: _context.ShapeInferenceContext, node: ir.Node) -> None:
     """Infer shape and dtype for Unique operator.
 
-    All outputs have dynamic shapes.
+    Preserve the input rank when axis is specified; only that dimension is
+    data-dependent. Without axis, the unique values are flattened.
     """
     (x,) = _context.check_inputs(node, "X")
 
     axis_attr = node.attributes.get("axis")
     x_const = ir.convenience.get_const_tensor(node.inputs[0])  # type: ignore[arg-type]
 
+    input_shape = x_const.shape if x_const is not None else x.shape
+    axis = axis_attr.as_int() if axis_attr is not None else None
+    if axis is not None and input_shape is not None:
+        axis = _shape_ops.normalize_axis(ctx, node, axis, input_shape.rank())
+        if axis is None:
+            for index, output in enumerate(node.outputs):
+                ctx.set_shape_and_dtype(
+                    output, None, x.dtype if index == 0 else ir.DataType.INT64
+                )
+            return
+
     unique_len: int | ir.SymbolicDim = ctx.new_symbolic_dim()
     inv_len: int | ir.SymbolicDim = ctx.new_symbolic_dim()
-    y_shape: ir.Shape
+    y_shape: ir.Shape | None = None
 
     if x_const is not None:
         arr = x_const.numpy()
-        if axis_attr is not None:
-            axis = axis_attr.as_int()
+        if axis is not None:
             unique_vals = np.unique(arr, axis=axis)
             unique_len = unique_vals.shape[axis]
             inv_len = arr.shape[axis]
@@ -106,8 +117,13 @@ def infer_unique(ctx: _context.ShapeInferenceContext, node: ir.Node) -> None:
             unique_len = len(unique_vals)
             inv_len = int(arr.size)
             y_shape = ir.Shape([unique_len])
-    else:
+    elif axis_attr is None:
         y_shape = ir.Shape([unique_len])
+    elif x.shape is not None and axis is not None:
+        y_dims = list(x.shape.dims)
+        y_dims[axis] = unique_len
+        y_shape = ir.Shape(y_dims)
+        inv_len = x.shape[axis]
 
     # Y: unique values
     if len(node.outputs) > 0:
