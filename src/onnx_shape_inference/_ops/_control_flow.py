@@ -189,16 +189,10 @@ def infer_loop(ctx: _context.ShapeInferenceContext, node: ir.Node) -> None:
     # Number of loop-carried dependencies (node inputs beyond max_trip_count and cond)
     num_loop_carried = len(node.inputs) - 2
 
-    # The scan-output stacking dimension is the trip count.  When the
-    # ``max_trip_count`` input carries a known symbolic value (e.g. it was
-    # computed as ``Gather(Shape(X), 0)``), reuse it so the scan dimension is
-    # related to the originating dim instead of an opaque fresh symbol.
-    trip_dim: int | ir.SymbolicDim | None = None
-    max_trip = node.inputs[0] if len(node.inputs) > 0 else None
-    if max_trip is not None:
-        trip_sym = ctx.get_symbolic_value(max_trip)
-        if trip_sym is not None and len(trip_sym) == 1:
-            trip_dim = trip_sym[0]
+    # M is an upper bound, not the executed trip count: either the initial
+    # condition or the body can terminate the loop before that bound.
+    trip_dim = _known_loop_iterations(ctx, node, body_graph)
+    scan_dim: int | ir.SymbolicDim | None = trip_dim
 
     for i, output in enumerate(node.outputs):
         # Body output index: offset by 1 because body output[0] is the condition
@@ -211,20 +205,89 @@ def infer_loop(ctx: _context.ShapeInferenceContext, node: ir.Node) -> None:
         body_shape = body_out.shape
 
         if i < num_loop_carried:
-            # Loop-carried dependency: shape matches body output directly
-            body_type = body_out.type
-            if body_type is not None and not isinstance(body_type, ir.TensorType):
-                ctx.set_type(output, body_type)
+            initial = node.inputs[i + 2]
+            if trip_dim == 0:
+                carried = initial
+                shape = initial.shape if initial is not None else None
             else:
-                ctx.set_shape_and_dtype(output, body_shape, dtype)
+                carried = body_out
+                if trip_dim == 1:
+                    shape = body_shape
+                elif (
+                    initial is not None
+                    and initial.shape is not None
+                    and body_shape is not None
+                ):
+                    # Only dimensions invariant between the initial value and
+                    # one iteration are safe for arbitrary iteration counts.
+                    shape = _merge_shapes(ctx, node, initial.shape, body_shape, i)
+                else:
+                    shape = None
+            if carried is not None:
+                if carried.type is not None and not isinstance(carried.type, ir.TensorType):
+                    ctx.set_type(output, carried.type)
+                else:
+                    ctx.set_shape_and_dtype(output, shape, carried.dtype)
         else:
-            # Scan output: prepend a trip-count dimension to body output shape
-            if body_shape is not None:
-                dim = trip_dim if trip_dim is not None else ctx.new_symbolic_dim()
-                scan_shape = ir.Shape([dim, *body_shape.dims])
-            else:
-                scan_shape = None
+            if scan_dim is None:
+                scan_dim = ctx.new_symbolic_dim()
+            scan_shape = (
+                ir.Shape([scan_dim, *body_shape.dims]) if body_shape is not None else None
+            )
             ctx.set_shape_and_dtype(output, scan_shape, dtype)
+
+
+def _known_loop_iterations(
+    ctx: _context.ShapeInferenceContext, node: ir.Node, body: ir.Graph
+) -> int | ir.SymbolicDim | None:
+    """Return an exact iteration count only when the condition proves it."""
+    maximum = node.inputs[0]
+    limit: int | ir.SymbolicDim | None = None
+    if maximum is not None:
+        data = ctx.get_symbolic_value(maximum)
+        if data is not None and len(data) == 1:
+            limit = data[0]
+    if isinstance(limit, int) and limit <= 0:
+        return 0
+
+    def constant_bool(value: ir.Value | None) -> bool | None:
+        if value is None:
+            return None
+        tensor = ir.convenience.get_const_tensor(value)
+        if tensor is not None and tensor.dtype == ir.DataType.BOOL and tensor.size == 1:
+            return bool(tensor.numpy().item())
+        return None
+
+    initial = constant_bool(node.inputs[1])
+    if initial is False:
+        return 0
+    if initial is not True or not body.outputs:
+        return None
+    condition = body.outputs[0]
+    continuing = constant_bool(condition)
+    if continuing is False:
+        if maximum is None or (isinstance(limit, int) and limit > 0):
+            return 1
+        return None
+    # Passing the condition through Identity is equivalent to returning true
+    # when the initial condition is known true.
+    visited: set[ir.Value] = set()
+    while condition not in visited:
+        visited.add(condition)
+        producer = condition.producer()
+        if producer is None or producer.domain != "" or producer.op_type != "Identity":
+            break
+        source = producer.inputs[0]
+        if source is None:
+            break
+        condition = source
+    if continuing is not True and (len(body.inputs) < 2 or condition is not body.inputs[1]):
+        return None
+    if isinstance(limit, int):
+        return max(0, limit)
+    if limit is not None:
+        return ctx.simplify_dim(ir.SymbolicDim(f"Max(0, {limit})"))
+    return None
 
 
 @_registry.registry.register("", "Scan", since_version=9)

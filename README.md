@@ -118,12 +118,22 @@ x = ir.Value(name="x", shape=ir.Shape([2, 3]), type=ir.TensorType(ir.DataType.FL
 y = ir.Value(name="y")
 node = ir.Node("", "Relu", inputs=[x], outputs=[y])
 
-# Run inference
-infer_func(ctx, node)
+# Run inference atomically when failures should leave the graph unchanged
+if infer_func is not None:
+    with ctx.transaction(node):
+        infer_func(ctx, node)
 
 print(y.shape)  # [2,3]
 print(y.dtype)  # FLOAT
 ```
+
+`ctx.transaction(node)` restores type/shape metadata, constants, propagated shape
+data, and newly recorded constraints if inference raises. The exception is still
+propagated to the caller. Transactions journal only touched values rather than
+copying graph history. Allocated symbol names are not reused after failure;
+graph structure, tensor contents, and changes through other contexts are outside
+the transaction. `ctx.clear_symbolic_value(value)` invalidates inferred shape data
+and constants owned by the context while preserving caller-provided constants.
 
 ### Registering custom operators
 

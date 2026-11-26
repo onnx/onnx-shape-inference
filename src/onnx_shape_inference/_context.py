@@ -12,9 +12,11 @@ __all__ = [
     "SYM_DATA_KEY",
 ]
 
+import contextlib
+import dataclasses
 import json
 import logging
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Generator, Iterable, Mapping, Sequence
 from typing import Literal
 
 import onnx_ir as ir
@@ -232,6 +234,81 @@ def _dims_conflict(
     return False
 
 
+@dataclasses.dataclass
+class _ValueSnapshot:
+    type: ir.TypeProtocol | None
+    shape: ir.Shape | None
+    shape_copy: ir.Shape | None
+    const_value: ir.TensorProtocol | None
+    sym_data: str | None
+    symbolic_value: list[int | ir.SymbolicDim] | None
+    symbolic_value_copy: list[int | ir.SymbolicDim] | None
+    propagated_constant: ir.TensorProtocol | None
+
+
+class _InferenceTransaction:
+    """A journal proportional to values touched by one inference attempt."""
+
+    def __init__(self, context: ShapeInferenceContext) -> None:
+        self.values: dict[ir.Value, _ValueSnapshot] = {}
+        self.types: dict[int, tuple[ir.TensorType | ir.SparseTensorType, ir.DataType]] = {}
+        self.error_count = len(context._errors)
+        self.equality_count = len(context._symbolic_equalities)
+        self.upper_bound_count = len(context._symbolic_upper_bounds)
+
+    def remember(self, context: ShapeInferenceContext, value: ir.Value) -> None:
+        type_ = value.type
+        # Sequence/Optional dtype setters recurse into their element type, so
+        # journal the actual mutable tensor leaf rather than only the wrapper.
+        leaf = type_
+        while isinstance(leaf, (ir.SequenceType, ir.OptionalType)):
+            leaf = leaf.elem_type
+        if isinstance(leaf, (ir.TensorType, ir.SparseTensorType)):
+            self.types.setdefault(id(leaf), (leaf, leaf.dtype))
+        if value in self.values:
+            return
+        symbolic = context._symbolic_values.get(value)
+        self.values[value] = _ValueSnapshot(
+            type=type_,
+            shape=value.shape,
+            shape_copy=value.shape.copy() if value.shape is not None else None,
+            const_value=value.const_value,
+            sym_data=value.metadata_props.get(SYM_DATA_KEY),
+            symbolic_value=symbolic,
+            symbolic_value_copy=list(symbolic) if isinstance(symbolic, list) else None,
+            propagated_constant=context._propagated_constants.get(value),
+        )
+
+    def rollback(self, context: ShapeInferenceContext) -> None:
+        # Value.dtype mutates TensorType in place. Restore the original objects
+        # first so aliases outside the node are repaired as well.
+        for type_, dtype in self.types.values():
+            type_.dtype = dtype
+        for value, state in self.values.items():
+            value.type = state.type
+            if state.shape is not None and state.shape != state.shape_copy:
+                for index, dim in enumerate(state.shape_copy):
+                    state.shape[index] = dim
+            value.shape = state.shape
+            value.const_value = state.const_value
+            if state.sym_data is None:
+                value.metadata_props.pop(SYM_DATA_KEY, None)
+            else:
+                value.metadata_props[SYM_DATA_KEY] = state.sym_data
+            if state.symbolic_value is None:
+                context._symbolic_values.pop(value, None)
+            else:
+                state.symbolic_value[:] = state.symbolic_value_copy
+                context._symbolic_values[value] = state.symbolic_value
+            if state.propagated_constant is None:
+                context._propagated_constants.pop(value, None)
+            else:
+                context._propagated_constants[value] = state.propagated_constant
+        del context._errors[self.error_count :]
+        del context._symbolic_equalities[self.equality_count :]
+        del context._symbolic_upper_bounds[self.upper_bound_count :]
+
+
 class ShapeInferenceContext:
     """Context for shape and type inference operations.
 
@@ -289,6 +366,47 @@ class ShapeInferenceContext:
         # ``NonZero`` count <= number of elements).  Kept for consumers that
         # want provable bounds; not used for renaming.
         self._symbolic_upper_bounds: list[tuple[str, str]] = []
+        self._transactions: list[_InferenceTransaction] = []
+
+    @contextlib.contextmanager
+    def transaction(self, node: ir.Node) -> Generator[None, None, None]:
+        """Roll back inference metadata if an inference attempt raises.
+
+        Node inputs and outputs are journaled before inference, including direct
+        changes to their type, shape, constant and symbolic-data annotation.
+        Values subsequently changed through this context's setters are journaled
+        on first use. Propagated data, constant ownership and newly recorded
+        errors and constraints are restored on failure. Successful attempts keep
+        their normal behavior. Nested transactions on this context are supported.
+
+        The journal does not copy tensors or traverse previous graph history.
+        Allocated/reserved symbol names are intentionally retained after failure
+        so a name exposed by an aborted attempt is never reused. Transactions do
+        not cover tensor contents, graph structure, unrelated metadata or changes
+        made through a different (including child) context.
+
+        Args:
+            node: The node whose inference is attempted.
+
+        Yields:
+            Control to the inference implementation.
+        """
+        transaction = _InferenceTransaction(self)
+        self._transactions.append(transaction)
+        try:
+            for value in (*node.inputs, *node.outputs):
+                if value is not None:
+                    self._remember_value(value)
+            yield
+        except BaseException:
+            transaction.rollback(self)
+            raise
+        finally:
+            self._transactions.pop()
+
+    def _remember_value(self, value: ir.Value) -> None:
+        for transaction in self._transactions:
+            transaction.remember(self, value)
 
     def create_child(
         self,
@@ -502,6 +620,7 @@ class ShapeInferenceContext:
         Returns:
             ``True`` if any dim was renamed.
         """
+        self._remember_value(value)
         shape = value.shape
         if shape is None:
             return False
@@ -572,6 +691,7 @@ class ShapeInferenceContext:
             ValueError: If policy is STRICT and shapes conflict, or if
                 the shape contains anonymous (None) symbolic dims.
         """
+        self._remember_value(value)
         self._check_no_anonymous_dims(shape)
 
         existing = value.shape
@@ -673,6 +793,7 @@ class ShapeInferenceContext:
         Raises:
             ValueError: If policy is STRICT and dtypes conflict.
         """
+        self._remember_value(value)
         existing = value.dtype
 
         if existing is None:
@@ -713,6 +834,7 @@ class ShapeInferenceContext:
         Raises:
             ValueError: If policy is ``"strict"`` and types conflict.
         """
+        self._remember_value(value)
         existing = value.type
 
         if existing is None:
@@ -788,6 +910,7 @@ class ShapeInferenceContext:
             value: The value to annotate.
             data: A list of known element values (int or SymbolicDim).
         """
+        self._remember_value(value)
         # Invalidate only constants synthesized by this context. Model constants
         # and constants replaced by callers retain their original ownership.
         previous = self._propagated_constants.pop(value, None)
@@ -823,6 +946,22 @@ class ShapeInferenceContext:
                 logger.debug("Setting const_value for %s to %s", value.name, data)
             value.const_value = ir.tensor(data, dtype=dtype, name=value.name)
             self._propagated_constants[value] = value.const_value
+
+    def clear_symbolic_value(self, value: ir.Value) -> None:
+        """Forget propagated data without removing a caller-owned constant.
+
+        Only a constant still owned by this context is cleared. In particular,
+        a caller's replacement of an earlier propagated constant is preserved.
+
+        Args:
+            value: The value whose propagated contents should be invalidated.
+        """
+        self._remember_value(value)
+        previous = self._propagated_constants.pop(value, None)
+        if previous is not None and value.const_value is previous:
+            value.const_value = None
+        self._symbolic_values.pop(value, None)
+        value.metadata_props.pop(SYM_DATA_KEY, None)
 
     def get_symbolic_value(
         self,
