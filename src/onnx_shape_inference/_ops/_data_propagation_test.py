@@ -475,7 +475,7 @@ class CastPropagationTest(unittest.TestCase):
 
     def test_cast_propagates(self):
         ctx = _context.ShapeInferenceContext({"": 17})
-        data = ir.Value(name="data", type=ir.TensorType(INT64))
+        data = ir.Value(name="data", type=ir.TensorType(ir.DataType.INT32))
         data.shape = ir.Shape([3])
         ctx.set_symbolic_value(data, [ir.SymbolicDim("N"), 3, ir.SymbolicDim("H")])
 
@@ -484,7 +484,7 @@ class CastPropagationTest(unittest.TestCase):
             "",
             "Cast",
             [data],
-            attributes={"to": ir.Attr("to", ir.AttributeType.INT, ir.DataType.INT32.value)},
+            attributes={"to": ir.Attr("to", ir.AttributeType.INT, ir.DataType.INT64.value)},
         )
         sym_val = ctx.get_symbolic_value(out)
         self.assertIsNotNone(sym_val)

@@ -15,6 +15,45 @@ import onnx_ir as ir
 from onnx_shape_inference import _context, _registry
 
 
+def _propagate_integer_values(
+    ctx: _context.ShapeInferenceContext,
+    data: ir.Value,
+    output: ir.Value,
+    output_dtype: ir.DataType | None,
+) -> None:
+    """Keep shape-tensor data only when the cast provably preserves its values."""
+    input_dtype = data.dtype
+    if (
+        input_dtype is None
+        or output_dtype is None
+        or not input_dtype.is_integer()
+        or not output_dtype.is_integer()
+    ):
+        ctx.clear_symbolic_value(output)
+        return
+    values = ctx.get_symbolic_value(data)
+    if values is None:
+        ctx.clear_symbolic_value(output)
+        return
+
+    def bounds(dtype: ir.DataType) -> tuple[int, int]:
+        if dtype.is_signed():
+            limit = 1 << (dtype.bitwidth - 1)
+            return -limit, limit - 1
+        return 0, (1 << dtype.bitwidth) - 1
+
+    source_min, source_max = bounds(input_dtype)
+    target_min, target_max = bounds(output_dtype)
+    # Symbolic integers may take any value representable by the input dtype.
+    # Concrete values permit a narrower conversion when each value still fits.
+    if (target_min <= source_min and source_max <= target_max) or all(
+        isinstance(value, int) and target_min <= value <= target_max for value in values
+    ):
+        ctx.set_symbolic_value(output, values)
+    else:
+        ctx.clear_symbolic_value(output)
+
+
 @_registry.registry.register("", "Cast", since_version=1)
 def infer_cast(ctx: _context.ShapeInferenceContext, node: ir.Node) -> None:
     """Infer shape and dtype for Cast operator.
@@ -31,11 +70,7 @@ def infer_cast(ctx: _context.ShapeInferenceContext, node: ir.Node) -> None:
     if len(node.outputs) > 0:
         ctx.set_shape_and_dtype(node.outputs[0], data.shape, output_dtype)
 
-        # Propagate symbolic_value (casting does not change element values
-        # for integer types used in shape computation)
-        sym_val = ctx.get_symbolic_value(data)
-        if sym_val is not None:
-            ctx.set_symbolic_value(node.outputs[0], sym_val)
+        _propagate_integer_values(ctx, data, node.outputs[0], output_dtype)
 
 
 @_registry.registry.register("", "BitCast", since_version=26)
@@ -69,3 +104,4 @@ def infer_cast_like(ctx: _context.ShapeInferenceContext, node: ir.Node) -> None:
     output_dtype = target.dtype
     if len(node.outputs) > 0:
         ctx.set_shape_and_dtype(node.outputs[0], data.shape, output_dtype)
+        _propagate_integer_values(ctx, data, node.outputs[0], output_dtype)
